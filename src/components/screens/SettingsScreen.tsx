@@ -504,8 +504,9 @@ function InstallSection() {
               Open this page in <strong>Safari</strong>.
             </li>
             <li>
-              Tap <Share className="inline size-4 align-[-3px]" aria-label="Share" /> <strong>Share</strong>, then{" "}
-              <SquarePlus className="inline size-4 align-[-3px]" aria-hidden /> <strong>Add to Home Screen</strong>.
+              Tap <Share className="inline size-4 align-[-3px]" aria-label="Share" /> <strong>Share</strong> (or <strong>⋯</strong> then Share), then{" "}
+              <SquarePlus className="inline size-4 align-[-3px]" aria-hidden /> <strong>Add to Home Screen</strong>. Keep{" "}
+              <strong>Open as Web App</strong> on.
             </li>
             <li>Open Comper from your Home Screen, sign in, and turn on notifications.</li>
           </ol>
