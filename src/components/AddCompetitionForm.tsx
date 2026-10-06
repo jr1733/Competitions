@@ -28,7 +28,18 @@ export function firstUrl(text: string): string {
  * Add a competition by pasting its link. Comper doesn't visit the page; you
  * fill in the details you want to see on the card.
  */
-export function AddCompetitionForm({ initialUrl = "", initialTitle = "", onAdded }: { initialUrl?: string; initialTitle?: string; onAdded?: () => void }) {
+export function AddCompetitionForm({
+  initialUrl = "",
+  initialTitle = "",
+  onAdded,
+  allowPaste = true,
+}: {
+  initialUrl?: string;
+  initialTitle?: string;
+  onAdded?: () => void;
+  /** Hide the Paste button where reading the clipboard is blocked (inside a Claude artifact). */
+  allowPaste?: boolean;
+}) {
   const [url, setUrl] = useState(initialUrl);
   const [prize, setPrize] = useState(initialTitle ? extractPrize(initialTitle, "") : "");
   const [closesOn, setClosesOn] = useState("");
@@ -103,9 +114,11 @@ export function AddCompetitionForm({ initialUrl = "", initialTitle = "", onAdded
             value={url}
             onChange={(e) => setUrl(e.target.value)}
           />
-          <button type="button" className="btn btn-secondary shrink-0 px-3" onClick={paste} aria-label="Paste link">
-            <ClipboardPaste className="size-5" aria-hidden />
-          </button>
+          {allowPaste && (
+            <button type="button" className="btn btn-secondary shrink-0 px-3" onClick={paste} aria-label="Paste link">
+              <ClipboardPaste className="size-5" aria-hidden />
+            </button>
+          )}
         </div>
       </div>
       <label className="flex flex-col gap-1.5">

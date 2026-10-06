@@ -9,6 +9,7 @@ import { ENTRY_TYPE_LABELS } from "@/lib/constants";
 import { formatShortDate, londonDateTime } from "@/lib/dates";
 import { formatGbp, formatRate, winStats } from "@/lib/stats";
 import { EntryTypeBadge } from "../Badges";
+import { ConfirmButton } from "../ConfirmButton";
 import { EmptyState } from "../EmptyState";
 import { LogWinForm } from "../LogWinForm";
 import { PageHeader } from "../PageHeader";
@@ -116,16 +117,9 @@ export function WinsScreen() {
                     <ExternalLink className="size-5" aria-hidden />
                   </a>
                 )}
-                <button
-                  type="button"
-                  className="rounded-full p-2.5 text-zinc-400"
-                  aria-label={`Delete win ${w.prize}`}
-                  onClick={() => {
-                    if (confirm(`Delete "${w.prize}"?`)) deleteWin(w.id);
-                  }}
-                >
+                <ConfirmButton label={`Delete win ${w.prize}`} onConfirm={() => deleteWin(w.id)}>
                   <Trash2 className="size-5" aria-hidden />
-                </button>
+                </ConfirmButton>
               </div>
             </article>
           ))}

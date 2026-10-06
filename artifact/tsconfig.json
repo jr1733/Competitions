@@ -1,0 +1,16 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "plugins": [],
+    "paths": {
+      "@/lib/client/data": ["./data.ts"],
+      "@/lib/client/resource": ["./resource.ts"],
+      "@/lib/client/outbox": ["./outbox.ts"],
+      "next/link": ["./shims/next-link.tsx"],
+      "next/navigation": ["./shims/next-navigation.ts"],
+      "@/*": ["../src/*"]
+    }
+  },
+  "include": ["./**/*.ts", "./**/*.tsx"],
+  "exclude": ["./dist"]
+}

@@ -40,6 +40,7 @@ import { hostOf } from "@/lib/feed/url";
 import type { Feed } from "@/lib/types";
 import { AddCompetitionForm } from "../AddCompetitionForm";
 import { useAuth } from "../AuthGate";
+import { ConfirmButton } from "../ConfirmButton";
 import { PageHeader } from "../PageHeader";
 import { Switch } from "../Switch";
 
@@ -252,16 +253,9 @@ function FeedsSection() {
                 </div>
               </div>
               <Switch checked={feed.enabled} label={`Fetch ${feed.name}`} onChange={(enabled) => updateFeed(feed.id, { enabled })} />
-              <button
-                type="button"
-                className="-mr-2 rounded-full p-2.5 text-zinc-400"
-                aria-label={`Delete ${feed.name}`}
-                onClick={() => {
-                  if (confirm(`Remove the feed "${feed.name}"? Competitions already in your feed stay.`)) deleteFeed(feed.id);
-                }}
-              >
+              <ConfirmButton label={`Remove the feed ${feed.name}`} confirmText="Remove?" className="-mr-2" onConfirm={() => deleteFeed(feed.id)}>
                 <Trash2 className="size-5" aria-hidden />
-              </button>
+              </ConfirmButton>
             </div>
           );
         })}

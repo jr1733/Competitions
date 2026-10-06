@@ -19,6 +19,7 @@ Vercel.
 
 ## Contents
 
+- [Run it inside Claude (artifact)](#run-it-inside-claude-artifact)
 - [Features](#features)
 - [How it works](#how-it-works)
 - [Setup](#setup)
@@ -32,6 +33,31 @@ Vercel.
 - [Install the app on your phone](#install-the-app-on-your-phone)
 - [Development](#development)
 - [Troubleshooting](#troubleshooting)
+
+## Run it inside Claude (artifact)
+
+Comper also runs as a Claude artifact, with no Supabase, Vercel or deployment
+needed. The `artifact/` folder builds the same screens into one self-contained
+page:
+
+```bash
+npm run build:artifact     # → artifact/dist/comper.html
+```
+
+What changes in the artifact version:
+
+- **Storage.** Feeds, competitions, entries and wins are saved in the
+  artifact's own database, under your private `data/users/<you>/` area. Nobody
+  else can read it, even if you share the page.
+- **Feed checking.** The page reads feeds through your **Parallel Search**
+  connector in claude.ai. It fetches each site's `robots.txt` first and skips
+  disallowed feeds, then parses the RSS in the browser. Feeds are checked when
+  you open Comper (at most every 6 hours) or when you tap refresh or **Check
+  all feeds now**.
+- **No push notifications.** Pages inside Claude can't send them. Re-entries
+  due and competitions closing soon show up when you open the app instead.
+- **No install.** Pin the artifact in Claude and open it from the Claude app on
+  your phone.
 
 ## Features
 
@@ -265,6 +291,7 @@ npm run lint        # ESLint
 npm run typecheck   # TypeScript
 npm run build       # production build
 npm run icons       # regenerate PWA icons from the SVG in scripts/generate-icons.mjs
+npm run build:artifact  # single-page Claude artifact → artifact/dist/comper.html
 ```
 
 ```
@@ -281,6 +308,7 @@ src/
     supabase/             browser client and service-role client (server only)
 public/sw.js              service worker: offline shell, push handlers
 supabase/migrations/      database schema and RLS
+artifact/                 Claude artifact build: data layer on the artifact database, connector feed fetching
 docs/PLAN.md              architecture, rules and schema overview
 tests/                    Vitest suites
 ```

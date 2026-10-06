@@ -1,0 +1,45 @@
+@import "tailwindcss" source(none);
+@import "../src/app/theme.css";
+
+@source "../src/components";
+@source "./";
+
+/* Dark mode follows the viewer's Claude theme: an explicit data-theme wins, otherwise the system setting. */
+@custom-variant dark {
+  @media (prefers-color-scheme: dark) {
+    &:where(:root:not([data-theme="light"]), :root:not([data-theme="light"]) *) {
+      @slot;
+    }
+  }
+  &:where(:root[data-theme="dark"], :root[data-theme="dark"] *) {
+    @slot;
+  }
+}
+
+:root {
+  --canvas: #f6f5fa;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --canvas: #0d0c12;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --canvas: #0d0c12;
+  color-scheme: dark;
+}
+
+body {
+  background: var(--canvas);
+  font-size: 16px;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-text-size-adjust: 100%;
+}
+
+/* The artifact viewer already pads the page by the safe-area insets: sticky headers sit at the inset, not inside extra padding. */
+header.sticky {
+  top: env(safe-area-inset-top, 0px);
+  padding-top: 0;
+}
