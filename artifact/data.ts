@@ -430,7 +430,10 @@ export class ConnectorProblem extends Error {
   }
 }
 
-function connectorMessage(error: McpError): string {
+export function connectorMessage(error: McpError): string {
+  if (/rate limit/i.test(error.message ?? "")) {
+    return `${FETCH_CONNECTOR} has run out of free requests for now. Try again later, or add your own Parallel API key to the connector.`;
+  }
   switch (error.code) {
     case "server_not_connected":
     case "server_not_found":
@@ -455,7 +458,7 @@ function connectorMessage(error: McpError): string {
   }
 }
 
-interface FetchResult {
+export interface FetchResult {
   url: string;
   content?: string;
   status?: number;
@@ -467,12 +470,12 @@ interface FetchPayload {
   errors?: { url: string; error_type?: string; http_status_code?: number | null; content?: string | null }[];
 }
 
-function urlKey(url: string): string {
+export function urlKey(url: string): string {
   return (normaliseUrl(url) ?? url).replace(/\/$/, "");
 }
 
 /** Fetch up to 20 URLs per call; at most one retry, and only for errors the connector marks retryable. */
-async function fetchUrls(mcp: McpNs, urls: string[], objective: string): Promise<Map<string, FetchResult>> {
+export async function fetchUrls(mcp: McpNs, urls: string[], objective: string): Promise<Map<string, FetchResult>> {
   const out = new Map<string, FetchResult>();
   for (let i = 0; i < urls.length; i += 20) {
     const batch = urls.slice(i, i + 20);
@@ -518,7 +521,7 @@ async function call(mcp: McpNs, input: unknown): Promise<FetchPayload> {
 type RobotsVerdict = { allowed: true } | { allowed: false; reason: string };
 
 /** robots.txt rules, RFC 9309 style: missing (4xx) = allowed; unreachable = skip for now. */
-function robotsVerdict(feedUrl: string, robots: FetchResult | undefined): RobotsVerdict {
+export function robotsVerdict(feedUrl: string, robots: FetchResult | undefined): RobotsVerdict {
   if (!robots) return { allowed: false, reason: "robots.txt couldn't be checked" };
   if (robots.content !== undefined) {
     const parsed = robotsParser(new URL("/robots.txt", feedUrl).toString(), robots.content);

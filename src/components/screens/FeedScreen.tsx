@@ -27,7 +27,12 @@ function matches(c: Competition, query: string) {
     .every((word) => haystack.includes(word));
 }
 
-export function FeedScreen() {
+export function FeedScreen({
+  emptyAction = { href: "/settings#feeds", label: "Add a feed" },
+}: {
+  /** Where the "no feeds yet" button goes. */
+  emptyAction?: { href: string; label: string };
+} = {}) {
   const { data, loading, offline, updatedAt, error } = useResource(feedResource);
   const feeds = useResource(feedsResource).data;
   const now = useNow();
@@ -183,8 +188,8 @@ export function FeedScreen() {
         {data && open.length === 0 && (feeds?.length ?? 0) === 0 && (
           <EmptyState icon={Rss} title="Add your first feed">
             <p>Comper reads competition RSS feeds every 6 hours.</p>
-            <Link href="/settings#feeds" className="btn btn-primary mt-4">
-              Add a feed
+            <Link href={emptyAction.href} className="btn btn-primary mt-4">
+              {emptyAction.label}
             </Link>
           </EmptyState>
         )}

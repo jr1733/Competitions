@@ -1,6 +1,18 @@
 "use client";
 
-import { BellRing, CircleCheck, LoaderCircle, Plus, RefreshCw, Rss, ShieldCheck, Trash2, TriangleAlert } from "lucide-react";
+import {
+  BellRing,
+  CircleCheck,
+  ExternalLink,
+  LoaderCircle,
+  Plus,
+  RefreshCw,
+  Rss,
+  Search,
+  ShieldCheck,
+  Trash2,
+  TriangleAlert,
+} from "lucide-react";
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { AddCompetitionForm } from "@/components/AddCompetitionForm";
 import { ConfirmButton } from "@/components/ConfirmButton";
@@ -23,8 +35,10 @@ import {
   reportCheck,
   statsResource,
   updateFeed,
+  urlKey,
   winsResource,
 } from "./data";
+import { discoverFeeds, type FeedCandidate } from "./discover";
 import { useResource } from "./resource";
 
 function Section({ id, title, children, description }: { id: string; title: string; description?: ReactNode; children: ReactNode }) {
@@ -239,6 +253,145 @@ function AddFeedForm({ onUsedConnector }: { onUsedConnector: () => void }) {
   );
 }
 
+type FindState =
+  | { phase: "idle" }
+  | { phase: "running"; message: string }
+  | { phase: "done"; results: FeedCandidate[] }
+  | { phase: "error"; message: string };
+
+function FindFeeds({ onUsedConnector }: { onUsedConnector: () => void }) {
+  const feeds = useResource(feedsResource).data ?? [];
+  const [state, setState] = useState<FindState>({ phase: "idle" });
+  const [checked, setChecked] = useState<Record<string, boolean>>({});
+  const [adding, setAdding] = useState<string | null>(null);
+  const added = new Set(feeds.map((f) => urlKey(f.url)));
+
+  async function search() {
+    setState({ phase: "running", message: "Starting…" });
+    try {
+      const results = await discoverFeeds(
+        feeds.map((f) => f.url),
+        (message) => setState({ phase: "running", message }),
+      );
+      setState({ phase: "done", results });
+    } catch (error) {
+      setState({ phase: "error", message: errorText(error) });
+    } finally {
+      onUsedConnector();
+    }
+  }
+
+  async function add(candidate: FeedCandidate) {
+    setAdding(candidate.url);
+    try {
+      const feed = await addFeed({ name: candidate.title, url: candidate.url });
+      toast(`Added ${candidate.title}. Checking it now…`);
+      reportCheck(await checkFeeds([feed.id]));
+    } catch (error) {
+      toast(errorText(error), { tone: "error" });
+    } finally {
+      setAdding(null);
+      onUsedConnector();
+    }
+  }
+
+  return (
+    <div id="find" className="card scroll-mt-20 p-4">
+      <div className="flex items-start gap-3">
+        <div className="rounded-xl bg-violet-100 p-2.5 text-violet-700 dark:bg-violet-950 dark:text-violet-300">
+          <Search className="size-5" aria-hidden />
+        </div>
+        <div className="min-w-0 flex-1">
+          <h3 className="font-semibold">Find feeds for me</h3>
+          <p className="mt-0.5 text-sm text-zinc-500 dark:text-zinc-400">
+            Searches the web for UK competition sites, checks each site&apos;s robots.txt, and shows the feeds it finds. Nothing is added
+            until you choose.
+          </p>
+        </div>
+      </div>
+
+      {state.phase !== "running" && (
+        <button type="button" className="btn btn-primary mt-3 w-full" onClick={search}>
+          <Search className="size-5" aria-hidden />
+          {state.phase === "done" ? "Search again" : "Find feeds"}
+        </button>
+      )}
+
+      {state.phase === "running" && (
+        <p className="mt-3 flex items-center gap-2 text-sm text-zinc-600 dark:text-zinc-300" role="status">
+          <LoaderCircle className="size-5 animate-spin text-violet-600" aria-hidden />
+          {state.message}
+        </p>
+      )}
+
+      {state.phase === "error" && (
+        <p className="mt-3 rounded-xl bg-red-50 p-3 text-sm text-red-800 dark:bg-red-950/60 dark:text-red-200" role="alert">
+          {state.message}
+        </p>
+      )}
+
+      {state.phase === "done" && state.results.length === 0 && (
+        <p className="mt-3 text-sm text-zinc-500" role="status">
+          No new competition feeds turned up this time. Try again later, or add one you know below.
+        </p>
+      )}
+
+      {state.phase === "done" && state.results.length > 0 && (
+        <ul className="mt-4 flex flex-col gap-3" aria-label="Feeds found">
+          {state.results.map((c) => {
+            const isAdded = added.has(urlKey(c.url));
+            return (
+              <li key={c.url} className="rounded-xl border border-zinc-200 p-3 dark:border-zinc-800">
+                <div className="flex items-start gap-2">
+                  <Rss className="mt-0.5 size-4 shrink-0 text-orange-500" aria-hidden />
+                  <div className="min-w-0 flex-1">
+                    <div className="font-semibold leading-snug">{c.title}</div>
+                    <div className="truncate text-xs text-zinc-500">{c.url.replace(/^https?:\/\//, "")}</div>
+                    <div className="mt-1 text-sm text-emerald-700 dark:text-emerald-400">
+                      {c.openCount} open of {c.itemCount} items
+                    </div>
+                    {c.sample.length > 0 && (
+                      <ul className="mt-1 list-disc pl-5 text-sm text-zinc-600 dark:text-zinc-300">
+                        {c.sample.map((prize) => (
+                          <li key={prize}>{prize}</li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                </div>
+                {isAdded ? (
+                  <p className="mt-2 flex items-center gap-1.5 text-sm font-medium text-emerald-700 dark:text-emerald-400">
+                    <CircleCheck className="size-4" aria-hidden /> Added
+                  </p>
+                ) : (
+                  <div className="mt-2 flex flex-col gap-2">
+                    <a href={c.siteUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-sm font-medium text-violet-700 dark:text-violet-300">
+                      Open {c.site} to read its terms <ExternalLink className="size-3.5" aria-hidden />
+                    </a>
+                    <label className="flex items-start gap-3">
+                      <input
+                        type="checkbox"
+                        className="mt-0.5 size-5 shrink-0 accent-violet-600"
+                        checked={!!checked[c.url]}
+                        onChange={(e) => setChecked((prev) => ({ ...prev, [c.url]: e.target.checked }))}
+                      />
+                      <span className="text-sm">I&apos;ve checked {c.site}&apos;s terms, and they allow personal use of its RSS feed.</span>
+                    </label>
+                    <button type="button" className="btn btn-secondary" disabled={!checked[c.url] || adding !== null} onClick={() => add(c)}>
+                      {adding === c.url ? <LoaderCircle className="size-5 animate-spin" aria-hidden /> : <Plus className="size-5" aria-hidden />}
+                      Add this feed
+                    </button>
+                  </div>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 function FeedsSection() {
   const { data: feeds } = useResource(feedsResource);
   const stats = useResource(statsResource).data;
@@ -265,6 +418,7 @@ function FeedsSection() {
     >
       <ConnectorNote state={connector} onChange={recheckConnector} />
       <div className="flex flex-col gap-3">
+        <FindFeeds onUsedConnector={recheckConnector} />
         {feeds?.map((feed) => {
           const status = feedStatus(feed);
           return (

@@ -54,6 +54,11 @@ What changes in the artifact version:
   disallowed feeds, then parses the RSS in the browser. Feeds are checked when
   you open Comper (at most every 6 hours) or when you tap refresh or **Check
   all feeds now**.
+- **Find feeds for me** (Settings). This searches the web for UK competition
+  sites, checks each site's robots.txt, then tries their usual feed addresses
+  (`/feed/`, `/rss`). It keeps only real RSS feeds whose items look like
+  competitions, shows what each contains, and adds one only after you confirm
+  you've checked that site's terms. It uses three connector calls per search.
 - **No push notifications.** Pages inside Claude can't send them. Re-entries
   due and competitions closing soon show up when you open the app instead.
 - **No install.** Pin the artifact in Claude and open it from the Claude app on

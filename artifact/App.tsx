@@ -65,7 +65,7 @@ export function App() {
     <>
       <div className="mx-auto min-h-dvh max-w-xl pb-24">
         <div hidden={pathname !== "/"}>
-          <FeedScreen />
+          <FeedScreen emptyAction={{ href: "/settings#find", label: "Find feeds for me" }} />
         </div>
         <div hidden={pathname !== "/entered"}>
           <EnteredScreen />
