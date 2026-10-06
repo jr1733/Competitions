@@ -45,8 +45,13 @@ export function winStats(entries: EntryWithCompetition[], wins: Win[], now = new
   };
 }
 
-export const gbp = new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP", maximumFractionDigits: 0 });
-export const gbpExact = new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP" });
+const wholePounds = new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP", maximumFractionDigits: 0 });
+const withPence = new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP" });
+
+/** £85.50, £120 (pence only when there are some). */
+export function formatGbp(value: number): string {
+  return Math.round(value * 100) % 100 === 0 ? wholePounds.format(value) : withPence.format(value);
+}
 
 /** 0.0222 → "1 in 45". */
 export function formatRate(rate: number | null): string {

@@ -7,7 +7,7 @@ import { useResource } from "@/lib/client/resource";
 import { useNow } from "@/lib/client/use-now";
 import { ENTRY_TYPE_LABELS } from "@/lib/constants";
 import { formatShortDate, londonDateTime } from "@/lib/dates";
-import { formatRate, gbp, gbpExact, winStats } from "@/lib/stats";
+import { formatGbp, formatRate, winStats } from "@/lib/stats";
 import { EntryTypeBadge } from "../Badges";
 import { EmptyState } from "../EmptyState";
 import { LogWinForm } from "../LogWinForm";
@@ -54,7 +54,7 @@ export function WinsScreen() {
       <main className="flex flex-col gap-5 px-4 pt-4">
         <div className="grid grid-cols-2 gap-3">
           <Stat label="Total wins" value={loaded ? String(stats.wins) : "–"} hint={`${stats.yearWins} this year`} />
-          <Stat label="Total value" value={loaded ? gbp.format(stats.value) : "–"} hint={`${gbp.format(stats.yearValue)} this year`} />
+          <Stat label="Total value" value={loaded ? formatGbp(stats.value) : "–"} hint={`${formatGbp(stats.yearValue)} this year`} />
           <Stat label="Win rate" value={loaded ? formatRate(stats.rate) : "–"} hint="per competition entered" />
           <Stat label="Entered" value={loaded ? String(stats.entered) : "–"} hint="competitions" />
         </div>
@@ -80,7 +80,7 @@ export function WinsScreen() {
                   <td className="px-2 py-3 text-right">{t.entered}</td>
                   <td className="px-2 py-3 text-right">{t.wins}</td>
                   <td className="px-2 py-3 text-right whitespace-nowrap">{formatRate(t.rate)}</td>
-                  <td className="px-4 py-3 text-right">{gbp.format(t.value)}</td>
+                  <td className="px-4 py-3 text-right">{formatGbp(t.value)}</td>
                 </tr>
               ))}
             </tbody>
@@ -105,7 +105,7 @@ export function WinsScreen() {
                 <h3 className="leading-snug font-semibold">{w.prize}</h3>
                 <div className="mt-1 flex flex-wrap items-center gap-2 text-sm text-zinc-500 dark:text-zinc-400">
                   <span>{wonOnLabel(w.won_on, now)}</span>
-                  {w.value_gbp !== null && <span className="font-semibold text-emerald-700 dark:text-emerald-400">{gbpExact.format(Number(w.value_gbp))}</span>}
+                  {w.value_gbp !== null && <span className="font-semibold text-emerald-700 dark:text-emerald-400">{formatGbp(Number(w.value_gbp))}</span>}
                   {w.entry_type && <EntryTypeBadge type={w.entry_type} />}
                 </div>
                 {w.notes && <p className="mt-1 text-sm text-zinc-500">{w.notes}</p>}

@@ -24,7 +24,7 @@ export function toast(message: string, options: Partial<Omit<Toast, "id" | "mess
   // Keep at most two on screen: the newest matters most.
   toasts = [...toasts.slice(-1), { id, message, tone: options.tone ?? "default", action: options.action }];
   emit();
-  setTimeout(() => dismissToast(id), options.durationMs ?? (options.action ? 6000 : 3500));
+  setTimeout(() => dismissToast(id), options.durationMs ?? (options.action ? 5000 : 2500));
   return id;
 }
 

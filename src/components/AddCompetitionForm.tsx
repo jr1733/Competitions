@@ -1,7 +1,7 @@
 "use client";
 
 import { ClipboardPaste, LoaderCircle, Plus } from "lucide-react";
-import { useState, type FormEvent } from "react";
+import { useId, useState, type FormEvent } from "react";
 import { addCompetition } from "@/lib/client/data";
 import { errorText } from "@/lib/client/network";
 import { toast } from "@/lib/client/toast";
@@ -37,6 +37,7 @@ export function AddCompetitionForm({ initialUrl = "", initialTitle = "", onAdded
   const [reentry, setReentry] = useState<Reentry>("none");
   const [alreadyEntered, setAlreadyEntered] = useState(false);
   const [busy, setBusy] = useState(false);
+  const linkId = useId();
 
   async function paste() {
     try {
@@ -87,10 +88,13 @@ export function AddCompetitionForm({ initialUrl = "", initialTitle = "", onAdded
 
   return (
     <form onSubmit={onSubmit} className="flex flex-col gap-4">
-      <label className="flex flex-col gap-1.5">
-        <span className="text-sm font-medium">Link</span>
+      <div className="flex flex-col gap-1.5">
+        <label htmlFor={linkId} className="text-sm font-medium">
+          Link
+        </label>
         <div className="flex gap-2">
           <input
+            id={linkId}
             className="input"
             type="url"
             inputMode="url"
@@ -103,7 +107,7 @@ export function AddCompetitionForm({ initialUrl = "", initialTitle = "", onAdded
             <ClipboardPaste className="size-5" aria-hidden />
           </button>
         </div>
-      </label>
+      </div>
       <label className="flex flex-col gap-1.5">
         <span className="text-sm font-medium">Prize</span>
         <input className="input" required maxLength={140} placeholder="e.g. £250 Currys voucher" value={prize} onChange={(e) => setPrize(e.target.value)} />

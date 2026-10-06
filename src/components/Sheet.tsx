@@ -21,7 +21,7 @@ export function Sheet({ open, onClose, title, children }: { open: boolean; onClo
 
   if (!open) return null;
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center" role="presentation">
+    <div className="fixed inset-0 z-[60] flex items-end justify-center" role="presentation">
       <button type="button" aria-label="Close" className="absolute inset-0 bg-black/40 backdrop-blur-[2px]" onClick={onClose} />
       <div
         role="dialog"

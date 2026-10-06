@@ -281,7 +281,7 @@ function FeedsSection() {
 // Notifications
 // ---------------------------------------------------------------------------
 
-function TimeField({ label, value, onSave, disabled }: { label: string; value: string; onSave: (time: string) => void; disabled?: boolean }) {
+function TimeField({ label, value, onSave }: { label: string; value: string; onSave: (time: string) => void }) {
   const [local, setLocal] = useState(trimSeconds(value));
   const [synced, setSynced] = useState(value);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -301,22 +301,34 @@ function TimeField({ label, value, onSave, disabled }: { label: string; value: s
     <input
       type="time"
       aria-label={label}
-      className="input w-32 shrink-0 text-center"
+      className="input w-36 shrink-0 text-center"
       value={local}
-      disabled={disabled}
       onChange={(e) => change(e.target.value)}
     />
   );
 }
 
-function SettingRow({ title, description, children }: { title: string; description: string; children: ReactNode }) {
+function SettingRow({
+  title,
+  description,
+  control,
+  children,
+}: {
+  title: string;
+  description: string;
+  control: ReactNode;
+  children?: ReactNode;
+}) {
   return (
-    <div className="flex items-center gap-3 px-4 py-3.5">
-      <div className="min-w-0 flex-1">
-        <div className="font-medium">{title}</div>
-        <div className="text-sm text-zinc-500 dark:text-zinc-400">{description}</div>
+    <div className="px-4 py-3.5">
+      <div className="flex items-center gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="font-medium">{title}</div>
+          <div className="text-sm text-zinc-500 dark:text-zinc-400">{description}</div>
+        </div>
+        {control}
       </div>
-      {children}
+      {children && <div className="mt-2.5 flex items-center gap-2 text-sm text-zinc-600 dark:text-zinc-400">{children}</div>}
     </div>
   );
 }
@@ -417,17 +429,35 @@ function NotificationsSection() {
 
       {settings && (
         <div className="card divide-y divide-zinc-100 dark:divide-zinc-800">
-          <SettingRow title="Daily digest" description="New competitions since the last digest">
-            <TimeField label="Digest time" value={settings.digest_time} disabled={!settings.digest_enabled} onSave={(t) => save({ digest_time: t })} />
-            <Switch checked={settings.digest_enabled} label="Daily digest" onChange={(v) => save({ digest_enabled: v })} />
+          <SettingRow
+            title="Daily digest"
+            description="New competitions since the last digest"
+            control={<Switch checked={settings.digest_enabled} label="Daily digest" onChange={(v) => save({ digest_enabled: v })} />}
+          >
+            {settings.digest_enabled && (
+              <>
+                Send at
+                <TimeField label="Digest time" value={settings.digest_time} onSave={(t) => save({ digest_time: t })} />
+              </>
+            )}
           </SettingRow>
-          <SettingRow title="Re-entry reminders" description="Daily and weekly competitions due today">
-            <TimeField label="Re-entry reminder time" value={settings.reentry_time} disabled={!settings.reentry_enabled} onSave={(t) => save({ reentry_time: t })} />
-            <Switch checked={settings.reentry_enabled} label="Re-entry reminders" onChange={(v) => save({ reentry_enabled: v })} />
+          <SettingRow
+            title="Re-entry reminders"
+            description="Daily and weekly competitions due today"
+            control={<Switch checked={settings.reentry_enabled} label="Re-entry reminders" onChange={(v) => save({ reentry_enabled: v })} />}
+          >
+            {settings.reentry_enabled && (
+              <>
+                Send at
+                <TimeField label="Re-entry reminder time" value={settings.reentry_time} onSave={(t) => save({ reentry_time: t })} />
+              </>
+            )}
           </SettingRow>
-          <SettingRow title="Closing soon" description="Competitions you've entered that close within 24 hours">
-            <Switch checked={settings.closing_enabled} label="Closing soon alerts" onChange={(v) => save({ closing_enabled: v })} />
-          </SettingRow>
+          <SettingRow
+            title="Closing soon"
+            description="Competitions you've entered that close within 24 hours"
+            control={<Switch checked={settings.closing_enabled} label="Closing soon alerts" onChange={(v) => save({ closing_enabled: v })} />}
+          />
           <div className="px-4 py-3.5">
             <div className="font-medium">Quiet hours</div>
             <div className="text-sm text-zinc-500 dark:text-zinc-400">No closing-soon alerts between these times</div>

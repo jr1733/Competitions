@@ -25,7 +25,9 @@ export function Toaster() {
           {t.action && (
             <button
               type="button"
-              className="-my-2 min-h-11 rounded-lg px-3 font-bold text-violet-300 dark:text-violet-700"
+              className={`-my-2 min-h-11 rounded-lg px-3 font-bold ${
+                t.tone === "default" ? "text-violet-300 dark:text-violet-700" : "text-white underline underline-offset-2"
+              }`}
               onClick={() => {
                 t.action?.onClick();
                 dismissToast(t.id);

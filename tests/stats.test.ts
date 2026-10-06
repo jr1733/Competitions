@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatRate, winStats } from "@/lib/stats";
+import { formatGbp, formatRate, winStats } from "@/lib/stats";
 import type { Competition, EntryWithCompetition, Win } from "@/lib/types";
 
 const comp = (id: string, entry_type: Competition["entry_type"]): Competition => ({
@@ -65,6 +65,12 @@ describe("winStats", () => {
     expect(online).toMatchObject({ entered: 2, wins: 1, value: 250, rate: 0.5 });
     expect(postal).toMatchObject({ entered: 1, wins: 1, value: 20.5, rate: 1 });
     expect(email).toMatchObject({ entered: 0, wins: 0, rate: null });
+  });
+
+  it("formats money with pence only when needed", () => {
+    expect(formatGbp(85.5)).toBe("£85.50");
+    expect(formatGbp(120)).toBe("£120");
+    expect(formatGbp(1250)).toBe("£1,250");
   });
 
   it("formats rates comper-style", () => {
