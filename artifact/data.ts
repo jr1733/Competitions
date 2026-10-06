@@ -430,10 +430,20 @@ export class ConnectorProblem extends Error {
   }
 }
 
+/** Text the connector itself sent back, when the platform passes it along (tool_error carries the result). */
+function connectorDetail(error: McpError): string {
+  const result = (error as McpError & { result?: unknown }).result as { content?: { type?: string; text?: string }[] } | undefined;
+  return (result?.content ?? [])
+    .map((c) => (c.type === "text" && typeof c.text === "string" ? c.text : ""))
+    .join(" ")
+    .trim();
+}
+
+const RATE_LIMITED = `${FETCH_CONNECTOR} has run out of free requests for now. Its free tier allows a limited number of searches and fetches; try again later, or add your own Parallel API key to the connector to lift the limit.`;
+
 export function connectorMessage(error: McpError): string {
-  if (/rate limit/i.test(error.message ?? "")) {
-    return `${FETCH_CONNECTOR} has run out of free requests for now. Try again later, or add your own Parallel API key to the connector.`;
-  }
+  const detail = connectorDetail(error);
+  if (/rate.?limit|too many requests|\b429\b|quota/i.test(`${error.message ?? ""} ${detail}`)) return RATE_LIMITED;
   switch (error.code) {
     case "server_not_connected":
     case "server_not_found":
@@ -453,8 +463,12 @@ export function connectorMessage(error: McpError): string {
     case "capability_disabled":
     case "capability_removed":
       return "Connectors aren't available in this view of Comper. Open it in Claude.";
+    case "tool_error":
+    case "upstream_error":
     default:
-      return error.message || "The feed couldn't be fetched.";
+      // The platform reports connector-side failures (including the free-tier limit) as a generic
+      // "Connector call failed", so say what usually causes it.
+      return `${FETCH_CONNECTOR} couldn't complete the request${detail ? ` (${detail.slice(0, 160)})` : ""}. This is usually its free request limit: try again later, or add your own Parallel API key to the connector. [${error.code || "error"}]`;
   }
 }
 
