@@ -82,8 +82,16 @@ function unescapeMarkdown(text: string): string {
 // Finding a site's feed from one of its pages
 // ---------------------------------------------------------------------------
 
-/** Free prize draws and giveaways: the kind of competition Comper is for. */
-const PRIZE_WORDS = /\bwin\b|\bgive-?aways?\b|\bprize draws?\b|\bfree draws?\b|\bsweepstakes?\b|\bup for grabs\b/i;
+/**
+ * An item offering a prize: "Win a…", "Win £250…", "Win 1 of 3…", a
+ * giveaway or prize draw. Not "a big radio win!" or "How to win…" posts
+ * about comping.
+ */
+const PRIZE_TITLE =
+  /^\W*win\b|\bwin (?:a|an|one|both|the|your|our|this|these|some|up to|tickets?|vouchers?|cash|£|\$|€|\d)|\bgiveaway\b|\bprize draws?\b|\bfree draws?\b|\bsweepstakes?\b|\bup for grabs\b/i;
+const ADVICE_TITLE = /^\W*(?:how to|tips\b|\d+ tips|my |our |why |what )/i;
+/** Categories that mark an item as a competition, e.g. "Free Competitions" on a freebies site. */
+const PRIZE_CATEGORY = /\bcompetitions?\b|\bgiveaways?\b|\bprize draws?\b|\bsweepstakes\b/i;
 
 /**
  * Competitions of another kind: judged on skill or with an entry fee
@@ -93,20 +101,26 @@ const PRIZE_WORDS = /\bwin\b|\bgive-?aways?\b|\bprize draws?\b|\bfree draws?\b|\
 const NOT_PRIZE_DRAWS =
   /\barchitect(?:s|ure|ural)?\b|\burban design\b|\bdesign (?:competition|challenge|contest|award)s?\b|\bcall for (?:entries|submissions|proposals|papers|artists|projects)\b|\b(?:entry|registration|submission) fees?\b|\bhackathons?\b|\bantitrust\b|\bmergers?\b|\bcartels?\b|\bworkers'? comp\b|\bscholarships?\b|\bfellowships?\b|\bresidenc(?:y|ies)\b|\bmanuscripts?\b|\bscreenplays?\b|\bshort stor(?:y|ies)\b|\bpoetry\b|\bessay (?:competition|contest|prize)s?\b/i;
 
-/** Feed titles and descriptions that mean a feed is about something else, even if it says "competitions". */
+/** Feed titles, descriptions and topics that mean a feed is about something else, even if it says "competitions" or "giveaways". */
 const OFF_TOPIC_FEED =
-  /\bdesign\b|\blaw\b|\blegal\b|\bmusic\b|\bgarage\b|\brhetoric\b|\bchess\b|\be-?sports?\b|\bphotograph(?:y|ers?)\b|\bwriting\b|\bwriters?\b|\bstart-?ups?\b|\bprogramming\b|\bcoding\b/i;
+  /\bdesign\b|\blaw\b|\blegal\b|\bmusic\b|\bgarage\b|\brhetoric\b|\bchess\b|\be-?sports?\b|\bphotograph(?:y|ers?)\b|\bwriting\b|\bwriters?\b|\bstart-?ups?\b|\bprogramming\b|\bcoding\b|\bsoftware\b|\blicen[cs]ed\b|\bandroid\b|\biphone\b|\bapps\b|\bgam(?:e|es|ing)\b|\btech\b|\bcoupons?\b|\budemy\b|\bcourses\b|\bcasinos?\b|\bconcursos\b|\bcompetitive\b|\bmarkets authority\b|\bpatents?\b/i;
 
 const plain = (html: string) => html.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").slice(0, 400);
 
+/** Does this item offer a prize, rather than talk about comping or a contest of another kind? */
+export function isPrizeItem(item: { title: string; html?: string; categories?: string[] }): boolean {
+  if (ADVICE_TITLE.test(item.title)) return false;
+  return PRIZE_TITLE.test(item.title) || (item.categories ?? []).some((c) => PRIZE_CATEGORY.test(c));
+}
+
 /**
- * A feed counts as prize draws when at least 40% of its item titles offer
- * something to win or give away, and under 20% of its items read like
- * skill or paid competitions.
+ * A feed counts as prize draws when at least 40% of its items offer
+ * something to win (by title or category), and under 20% of its items
+ * read like skill or paid competitions.
  */
-export function looksLikePrizeDraws(items: { title: string; html?: string }[]): boolean {
+export function looksLikePrizeDraws(items: { title: string; html?: string; categories?: string[] }[]): boolean {
   if (!items.length) return false;
-  const prizes = items.filter((i) => PRIZE_WORDS.test(i.title)).length;
+  const prizes = items.filter(isPrizeItem).length;
   const others = items.filter((i) => NOT_PRIZE_DRAWS.test(`${i.title} ${plain(i.html ?? "")}`)).length;
   return prizes / items.length >= 0.4 && others / items.length < 0.2;
 }

@@ -342,7 +342,7 @@ function FindFeeds({ onUsedConnector }: { onUsedConnector: () => void }) {
 
       {state.phase === "done" && state.directorySkipped && (
         <p className="mt-3 text-sm text-amber-700 dark:text-amber-400" role="status">
-          Feedly&apos;s feed directory didn&apos;t answer this time, so Comper looked on UK comping sites instead. Search again later for more.
+          Feedly&apos;s feed directory didn&apos;t answer this time, so the list may be shorter than usual. Search again later for more.
         </p>
       )}
 

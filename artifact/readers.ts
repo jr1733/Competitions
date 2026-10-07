@@ -161,6 +161,17 @@ export function parseAnyFeed(content: string): ParsedFeed {
   return parseFetchedFeed(text);
 }
 
+/**
+ * A reader's copy that has stopped updating: its newest item is over 45
+ * days old. Feedly keeps serving its last copy of a feed it no longer
+ * polls (ThePrizeFinder's "Closing soon" was months behind), so another
+ * route is tried instead.
+ */
+export function isStale(feed: ParsedFeed, nowMs = Date.now()): boolean {
+  const times = feed.items.map((i) => (i.publishedAt ? Date.parse(i.publishedAt) : NaN)).filter((t) => !Number.isNaN(t));
+  return times.length > 0 && Math.max(...times) < nowMs - 45 * 86_400_000;
+}
+
 // ---------------------------------------------------------------------------
 // Feedly's feed directory
 // ---------------------------------------------------------------------------
@@ -174,6 +185,8 @@ export interface DirectoryHit {
   /** When Feedly last saw a new item, if it says. */
   lastUpdated: number | null;
   language: string | null;
+  /** Feedly's topics for the feed, e.g. "software", "deals", "architecture". */
+  topics: string[];
 }
 
 interface FeedlySearchResult {
@@ -186,6 +199,7 @@ interface FeedlySearchResult {
   lastUpdated?: number;
   updated?: number;
   language?: string;
+  topics?: unknown[];
 }
 
 function hitFrom(r: FeedlySearchResult): DirectoryHit | null {
@@ -201,6 +215,7 @@ function hitFrom(r: FeedlySearchResult): DirectoryHit | null {
     subscribers: typeof r.subscribers === "number" ? r.subscribers : 0,
     lastUpdated: typeof when === "number" ? when : null,
     language: str(r.language) || null,
+    topics: Array.isArray(r.topics) ? r.topics.filter((t): t is string => typeof t === "string") : [],
   };
 }
 

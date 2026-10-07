@@ -103,7 +103,7 @@ const DIRECTORY = {
     { feedId: "feed/https://news.example.net/feed/", title: "Daily news", description: "Top stories", subscribers: 50_000, lastUpdated: Date.UTC(2026, 9, 6) },
     { feedId: "feed/https://old.example.co.uk/feed/", title: "Old comps", description: "Competitions", subscribers: 10, lastUpdated: Date.UTC(2024, 0, 1) },
     { feedId: "feed/https://concours.example.fr/feed/", title: "Concours gratuits", description: "Gagnez des prizes", language: "fr" },
-    { feedId: "feed/https://giveaways.example.com/feed/", title: "Giveaway Hub", description: "Win prizes daily", subscribers: 300, lastUpdated: 1_790_000_000 },
+    { feedId: "feed/https://giveaways.example.co.uk/feed/", title: "Giveaway Hub", description: "Win prizes daily", subscribers: 300, lastUpdated: 1_790_000_000 },
     { feedId: "feed/https://www.facebook.com/comps", title: "Comps on Facebook", description: "competitions" },
     { id: "topic/competitions", title: "Not a feed" },
   ],
@@ -121,6 +121,7 @@ describe("parseDirectory", () => {
       subscribers: 812,
       lastUpdated: Date.UTC(2026, 9, 6),
       language: "en",
+      topics: [],
     });
     // Seconds are turned into milliseconds.
     expect(hits[4].lastUpdated).toBe(1_790_000_000_000);
@@ -142,13 +143,13 @@ describe("pickDirectoryHits", () => {
   it("keeps recent English competition feeds, well-known sites first", () => {
     expect(pickDirectoryHits(hits, new Set(), 15, now).map((h) => h.feedUrl)).toEqual([
       "http://www.theprizefinder.com/feed/new-competitions",
-      "https://giveaways.example.com/feed/",
+      "https://giveaways.example.co.uk/feed/",
     ]);
   });
 
   it("leaves out feeds already added", () => {
     const existing = new Set(["http://www.theprizefinder.com/feed/new-competitions"]);
-    expect(pickDirectoryHits(hits, existing, 15, now).map((h) => h.feedUrl)).toEqual(["https://giveaways.example.com/feed/"]);
+    expect(pickDirectoryHits(hits, existing, 15, now).map((h) => h.feedUrl)).toEqual(["https://giveaways.example.co.uk/feed/"]);
   });
 
   it("caps the number to read", () => {
@@ -160,6 +161,7 @@ describe("pickDirectoryHits", () => {
       subscribers: i,
       lastUpdated: null,
       language: null,
+      topics: [],
     }));
     const picked = pickDirectoryHits(many, new Set(), 15, now);
     expect(picked).toHaveLength(15);
@@ -185,6 +187,7 @@ const hit = (feedUrl: string, title: string, description = "", website: string |
   subscribers: 10,
   lastUpdated: null,
   language: "en",
+  topics: [],
 });
 
 describe("hitStrength", () => {
@@ -198,7 +201,9 @@ describe("hitStrength", () => {
   it("ranks known comping sites, then prize-draw words, then plain 'competitions'", () => {
     expect(hitStrength(hit("http://www.theprizefinder.com/feed/new-competitions", "New Competitions"))).toBe("known");
     expect(hitStrength(hit("https://mumblog.example.co.uk/feed/", "Mum Blog", "Family life, reviews and giveaways"))).toBe("strong");
-    expect(hitStrength(hit("http://bustler.net/feed/competitions", "Bustler Competitions"))).toBe("weak");
+    expect(hitStrength(hit("https://comps.example.co.uk/feed/", "Example Competitions"))).toBe("weak");
+    // Not British, so not even "weak".
+    expect(hitStrength(hit("http://bustler.net/feed/competitions", "Bustler Competitions"))).toBeNull();
   });
 });
 

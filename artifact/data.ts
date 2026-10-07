@@ -10,7 +10,7 @@ import type { Competition, EntryStatus, EntryWithCompetition, Feed, FeedStatus, 
 import { capability, FETCH_CONNECTOR, FETCH_TOOL, type CollectionRef, type DocRef, type McpError, type McpNs } from "./claude";
 import { COMMON_FEED_PAGES, COMMON_FEED_PATHS, feedLinksInPage, isFeedishUrl, looksLikePrizeDraws } from "./fetched-feed";
 import { NotAFeedError, type ParsedFeed } from "@/lib/feed/parse";
-import { parseAnyFeed, ROUTE_ORDER, routeUrl, type FeedRoute } from "./readers";
+import { isStale, parseAnyFeed, ROUTE_ORDER, routeUrl, type FeedRoute } from "./readers";
 import { Resource } from "./resource";
 
 /**
@@ -817,7 +817,8 @@ export async function readFeeds(
     if (res?.content !== undefined) {
       try {
         const parsed = parseAnyFeed(res.content);
-        if (parsed.items.length || route === "direct") {
+        // A reader's copy must have items and be current; the feed itself is taken as it is.
+        if (route === "direct" || (parsed.items.length && !isStale(parsed))) {
           out.set(urlKey(f.url), { url: f.url, parsed, via: route });
           continue;
         }
@@ -848,19 +849,25 @@ export async function readFeeds(
     return out;
   }
   for (const p of retry) {
+    // The first route (in order) with a current copy; failing that, the first with any items.
+    let fallback: FeedRead | null = null;
     for (const t of tries.filter((x) => x.feed === p.url)) {
       const content = second.get(urlKey(t.url))?.content;
       if (content === undefined) continue;
+      let parsed: ParsedFeed;
       try {
-        const parsed = parseAnyFeed(content);
-        if (parsed.items.length) {
-          out.set(urlKey(p.url), { url: p.url, parsed, via: t.route });
-          break;
-        }
+        parsed = parseAnyFeed(content);
       } catch {
-        // try the next route
+        continue; // try the next route
       }
+      if (!parsed.items.length) continue;
+      if (!isStale(parsed)) {
+        fallback = { url: p.url, parsed, via: t.route };
+        break;
+      }
+      fallback ??= { url: p.url, parsed, via: t.route };
     }
+    if (fallback) out.set(urlKey(p.url), fallback);
   }
   return out;
 }

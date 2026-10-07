@@ -140,15 +140,36 @@ export const DIRECTORY_QUERIES = ["comping", "giveaways", "competitions", "freeb
 
 export const DIRECTORY_SITES = [
   ...KNOWN_SITES.map((site) => bareHost(new URL(site).hostname)),
-  "thecompetitionsblog.com",
+  "latestfreestuff.co.uk",
   "pixieprizes.co.uk",
   "prizeparadise.co.uk",
-  "latestfreestuff.co.uk",
   "magicfreebiesuk.co.uk",
   "compersnews.com",
   "competitionsguide.co.uk",
   "ukcompetitions.org",
 ];
+
+/**
+ * UK competition feeds checked by hand (7 Oct 2026): robots.txt allows
+ * them and their items are free prize draws. Always read alongside what
+ * the directory finds, since Feedly lists only some of them. Addresses are
+ * as Feedly knows them.
+ */
+export const KNOWN_FEEDS: DirectoryHit[] = [
+  ["http://www.theprizefinder.com/feed/new-competitions", "ThePrizeFinder: New competitions"],
+  ["http://www.theprizefinder.com/feed/top-prizes", "ThePrizeFinder: Top prizes"],
+  ["http://www.theprizefinder.com/feed/closing-soon", "ThePrizeFinder: Closing soon"],
+  ["https://www.latestfreestuff.co.uk/free-competitions/feed/", "Latest Free Stuff: Free competitions"],
+].map(([feedUrl, title]) => ({
+  feedUrl,
+  title,
+  website: new URL(feedUrl).origin.replace(/^http:/, "https:"),
+  description: "",
+  subscribers: 0,
+  lastUpdated: null,
+  language: "en",
+  topics: [],
+}));
 
 export function directorySearchUrls(): string[] {
   return [...DIRECTORY_QUERIES.map((q) => feedlySearchUrl(q, 10)), ...DIRECTORY_SITES.map((site) => feedlySearchUrl(site, 5))].slice(0, 20);
@@ -162,7 +183,13 @@ const COMPETITION_TEXT = /\bcompetitions\b/i;
 
 export type HitStrength = "known" | "strong" | "weak";
 
-/** How sure the directory entry alone makes us: a known comping site, prize-draw words, or just "competitions". */
+const UK_TEXT = /\.uk\b|\buk\b|\bbritish\b|\bbritain\b|£/i;
+
+/**
+ * How sure the directory entry alone makes us: a known UK comping site,
+ * prize-draw words, or just "competitions". Anything else needs to say
+ * it's British and mustn't be about software, deals, design and so on.
+ */
 export function hitStrength(hit: DirectoryHit): HitStrength | null {
   const known = new Set(DIRECTORY_SITES);
   let host: string;
@@ -173,9 +200,10 @@ export function hitStrength(hit: DirectoryHit): HitStrength | null {
   } catch {
     return null;
   }
-  const text = `${hit.title} ${hit.description}`;
-  if (isOffTopicFeed(text)) return null;
   if (known.has(host) || known.has(siteHost)) return "known";
+  const text = `${hit.title} ${hit.description}`;
+  if (isOffTopicFeed(`${text} ${(hit.topics ?? []).join(" ")}`)) return null;
+  if (!UK_TEXT.test(`${text} ${hit.website ?? ""} ${hit.feedUrl}`)) return null;
   if (PRIZE_TEXT.test(text)) return "strong";
   if (COMPETITION_TEXT.test(`${text} ${hit.website ?? ""} ${hit.feedUrl}`)) return "weak";
   return null;
@@ -306,13 +334,19 @@ export async function discoverFeeds(existingUrls: string[], onProgress: (message
   onProgress("Searching Feedly's directory of RSS feeds…");
   let directorySkipped = false;
   let found: FeedCandidate[] = [];
+  let listed: DirectoryHit[] = [];
   try {
-    const hits = pickDirectoryHits(await searchDirectory(mcp), existing);
-    if (hits.length) found = await readDirectoryHits(mcp, hits, onProgress);
-    else directorySkipped = true;
+    listed = await searchDirectory(mcp);
   } catch (error) {
     if (error instanceof ConnectorProblem && STOP_CODES.has(error.code)) throw error;
     directorySkipped = true;
+  }
+  // The hand-checked feeds are read even when the directory doesn't answer.
+  const hits = pickDirectoryHits([...KNOWN_FEEDS, ...listed], existing);
+  try {
+    if (hits.length) found = await readDirectoryHits(mcp, hits, onProgress);
+  } catch (error) {
+    if (error instanceof ConnectorProblem && STOP_CODES.has(error.code)) throw error;
   }
   if (!found.length) {
     found = await discoverOnSites(mcp, existing, onProgress);
