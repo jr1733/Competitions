@@ -54,11 +54,23 @@ What changes in the artifact version:
   disallowed feeds, then parses the RSS in the browser. Feeds are checked when
   you open Comper (at most every 6 hours) or when you tap refresh or **Check
   all feeds now**.
-- **Find feeds for me** (Settings). This searches the web for UK competition
-  sites, checks each site's robots.txt, then tries their usual feed addresses
-  (`/feed/`, `/rss`). It keeps only real RSS feeds whose items look like
-  competitions, shows what each contains, and adds one only after you confirm
-  you've checked that site's terms. It uses three connector calls per search.
+- **Feed readers.** Parallel Search can read some RSS feeds but answers
+  `fetch_error` for many others, including most WordPress feeds. When that
+  happens Comper asks a feed-reader service for the same feed, still through
+  Parallel Search: [Feedly's public API](https://developers.feedly.com/),
+  [rss2json](https://rss2json.com/) or [Jina Reader](https://jina.ai/reader/).
+  These return the feed's own items, so Comper still reads RSS only and never
+  scrapes pages. The site's `robots.txt` is checked first either way, and
+  Comper remembers which route worked for each feed and tries it first next
+  time.
+- **Find feeds for me** (Settings). This searches Feedly's directory of RSS
+  feeds for UK competition feeds and the well-known comping sites, checks each
+  site's robots.txt, then reads the feeds it allows. It keeps feeds whose items
+  look like competitions and shows what each contains. Feeds the directory
+  lists but that couldn't be read just then are shown as "Couldn't preview".
+  If the directory can't be searched, it looks for feeds on the comping sites
+  themselves instead. It adds a feed only after you confirm you've checked
+  that site's terms. A search uses about four connector calls.
 - **No push notifications.** Pages inside Claude can't send them. Re-entries
   due and competitions closing soon show up when you open the app instead.
 - **No install.** Pin the artifact in Claude and open it from the Claude app on

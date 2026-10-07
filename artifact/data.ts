@@ -8,8 +8,9 @@ import { dedupeByUrl, itemToCompetition, type CompetitionDraft } from "@/lib/fee
 import { normaliseUrl } from "@/lib/feed/url";
 import type { Competition, EntryStatus, EntryWithCompetition, Feed, FeedStatus, Win } from "@/lib/types";
 import { capability, FETCH_CONNECTOR, FETCH_TOOL, type CollectionRef, type DocRef, type McpError, type McpNs } from "./claude";
-import { COMMON_FEED_PAGES, COMMON_FEED_PATHS, feedLinksInPage, looksLikeCompetitions, parseFetchedFeed } from "./fetched-feed";
+import { COMMON_FEED_PAGES, COMMON_FEED_PATHS, feedLinksInPage, isFeedishUrl, looksLikeCompetitions } from "./fetched-feed";
 import { NotAFeedError, type ParsedFeed } from "@/lib/feed/parse";
+import { parseAnyFeed, ROUTE_ORDER, routeUrl, type FeedRoute } from "./readers";
 import { Resource } from "./resource";
 
 /**
@@ -37,8 +38,11 @@ interface CompDoc extends Omit<Competition, "id" | "added_by"> {
   entry?: EntryState | null;
 }
 
-/** A feed as stored here: robots_ok_at remembers when robots.txt last allowed it (re-checked daily). */
-type StoredFeed = Feed & { robots_ok_at?: string | null };
+/**
+ * A feed as stored here: robots_ok_at remembers when robots.txt last allowed it (re-checked daily);
+ * via is how it was last read (directly, or through a feed reader), tried first next time.
+ */
+type StoredFeed = Feed & { robots_ok_at?: string | null; via?: FeedRoute | null };
 
 interface RootDoc {
   feeds: StoredFeed[];
@@ -363,8 +367,8 @@ export function deleteWin(id: string) {
 // Feeds
 // ---------------------------------------------------------------------------
 
-export async function addFeed(input: { name: string; url: string }): Promise<Feed> {
-  const feed: Feed = {
+export async function addFeed(input: { name: string; url: string; via?: FeedRoute | null }): Promise<Feed> {
+  const feed: StoredFeed = {
     id: crypto.randomUUID(),
     user_id: uid,
     name: input.name,
@@ -378,6 +382,7 @@ export async function addFeed(input: { name: string; url: string }): Promise<Fee
     last_error: null,
     last_new_items: null,
     created_at: now(),
+    via: input.via ?? null,
   };
   await updateRoot((r) => {
     if (r.feeds.some((f) => f.url === feed.url)) throw new Error("That feed is already in your list");
@@ -528,6 +533,17 @@ export function urlKey(url: string): string {
   return (normaliseUrl(url) ?? url).replace(/\/$/, "");
 }
 
+/** Letters and digits only: matches an address the connector echoes back re-encoded or with slashes merged. */
+function looseKey(url: string): string {
+  let decoded = url;
+  try {
+    decoded = decodeURIComponent(url);
+  } catch {
+    // keep as is
+  }
+  return decoded.toLowerCase().replace(/^https?:\/\//, "").replace(/[^a-z0-9]/g, "");
+}
+
 /** Fetch up to 20 URLs per call; at most one retry, and only for errors the connector marks retryable. */
 const LIFECYCLE_CODES = new Set(["not_granted", "capability_disabled", "capability_removed", "not_in_manifest", "server_not_connected", "server_not_found", "needs_reauth", "selection_required", "blocked_by_policy", "approval_required"]);
 
@@ -548,14 +564,18 @@ export async function fetchUrls(
   options: { detail?: boolean } = {},
 ): Promise<Map<string, FetchResult>> {
   const out = new Map<string, FetchResult>();
+  // The connector may echo an address back in a slightly different form: map it to the one asked for.
+  const asked = new Set(urls.map(urlKey));
+  const byLoose = new Map(urls.map((u) => [looseKey(u), urlKey(u)]));
+  const keyOf = (url: string) => (asked.has(urlKey(url)) ? urlKey(url) : (byLoose.get(looseKey(url)) ?? urlKey(url)));
 
   const absorb = (payload: FetchPayload) => {
     for (const r of payload.results ?? []) {
-      out.set(urlKey(r.url), { url: r.url, content: r.full_content ?? (r.excerpts ?? []).join("\n\n") });
+      out.set(keyOf(r.url), { url: r.url, content: r.full_content ?? (r.excerpts ?? []).join("\n\n") });
     }
     for (const e of payload.errors ?? []) {
-      if (out.get(urlKey(e.url))?.content !== undefined) continue; // a retry already got it
-      out.set(urlKey(e.url), {
+      if (out.get(keyOf(e.url))?.content !== undefined) continue; // a retry already got it
+      out.set(keyOf(e.url), {
         url: e.url,
         status: e.http_status_code ?? undefined,
         error: e.error_type ?? "fetch error",
@@ -587,7 +607,7 @@ export async function fetchUrls(
     } catch (error) {
       const e = error as McpError;
       lastError = e;
-      if (isRateLimit(e) || LIFECYCLE_CODES.has(e.code)) throw new ConnectorProblem(e.code, connectorMessage(e));
+      if (isRateLimit(e) || LIFECYCLE_CODES.has(e.code)) throw new ConnectorProblem(isRateLimit(e) ? "rate_limited" : e.code, connectorMessage(e));
       if (batch.length < 2 || depth >= 2) {
         for (const u of batch) out.set(urlKey(u), { url: u, error: `connector failed (${e.code})` });
         return;
@@ -625,7 +645,7 @@ export async function fetchUrls(
         let l: string[] | undefined;
         let s = "ok, page";
         try {
-          s = `ok, feed of ${parseFetchedFeed(r.content).items.length} items`;
+          s = `ok, feed of ${parseAnyFeed(r.content).items.length} items`;
         } catch {
           const hints = feedLinksInPage(r.content, u).hints.map((x) => x.replace(/^https?:\/\//, "").slice(0, 100));
           if (hints.length) l = hints;
@@ -708,24 +728,118 @@ export function robotsVerdict(feedUrl: string, robots: FetchResult | undefined):
 
 const FEED_OBJECTIVE = "Every item in this RSS feed: title, link, published date and description";
 
+export interface FeedRead {
+  url: string;
+  parsed?: ParsedFeed;
+  /** How it was read. */
+  via?: FeedRoute;
+  /** The address served an ordinary page, not a feed (only known when read directly). */
+  page?: string;
+  status?: number;
+  error?: string;
+}
+
+/** Why a feed couldn't be read, in words. Parallel reports its own failures as "HTTP 200 fetch_error". */
+export function readFailure(read: FeedRead | undefined): string {
+  if (read?.status && (read.status < 200 || read.status >= 300)) return `The feed returned HTTP ${read.status}`;
+  return `Couldn't read the feed directly or through the feed readers (${read?.error ?? "no answer"})`;
+}
+
+/**
+ * Read feeds, each by the route that worked last time (or directly), then
+ * through the feed readers (Feedly, rss2json, Jina Reader) for any the
+ * first try couldn't read: all the second tries go in one batch, for at
+ * most `maxFallback` feeds. A missing feed (404/410) isn't retried, and
+ * `fallback` can limit second tries to addresses that look like feeds.
+ * Callers check robots.txt for each feed's own site before calling.
+ */
+export async function readFeeds(
+  mcp: McpNs,
+  feeds: { url: string; via?: FeedRoute | null }[],
+  options: { detail?: boolean; count?: number; first?: FeedRoute; fallback?: (url: string) => boolean; maxFallback?: number } = {},
+): Promise<Map<string, FeedRead>> {
+  const out = new Map<string, FeedRead>();
+  const firstRoute = (f: { via?: FeedRoute | null }): FeedRoute => f.via ?? options.first ?? "direct";
+  const fetched = await fetchUrls(
+    mcp,
+    feeds.map((f) => routeUrl(firstRoute(f), f.url, options.count)),
+    FEED_OBJECTIVE,
+    { detail: options.detail },
+  );
+
+  const pending: { url: string; tried: FeedRoute }[] = [];
+  for (const f of feeds) {
+    const route = firstRoute(f);
+    const res = fetched.get(urlKey(routeUrl(route, f.url, options.count)));
+    if (res?.content !== undefined) {
+      try {
+        const parsed = parseAnyFeed(res.content);
+        if (parsed.items.length || route === "direct") {
+          out.set(urlKey(f.url), { url: f.url, parsed, via: route });
+          continue;
+        }
+      } catch (error) {
+        if (route === "direct" && error instanceof NotAFeedError) {
+          out.set(urlKey(f.url), { url: f.url, page: res.content });
+          continue;
+        }
+      }
+    }
+    out.set(urlKey(f.url), { url: f.url, status: res?.status, error: res?.content !== undefined ? "unreadable answer" : (res?.error ?? "no answer") });
+    const missing = route === "direct" && !!res?.status && [404, 410].includes(res.status);
+    if (!missing && (options.fallback?.(f.url) ?? true)) pending.push({ url: f.url, tried: route });
+  }
+
+  const retry = pending.slice(0, options.maxFallback ?? 6);
+  if (!retry.length) return out;
+  const tries = retry.flatMap((p) =>
+    ROUTE_ORDER.filter((r) => r !== p.tried).map((route) => ({ feed: p.url, route, url: routeUrl(route, p.url, options.count) })),
+  );
+  let second: Map<string, FetchResult>;
+  try {
+    second = await fetchUrls(mcp, tries.map((t) => t.url), FEED_OBJECTIVE, { detail: options.detail });
+  } catch (error) {
+    // Keep what the first try read; report the rest.
+    if (![...out.values()].some((r) => r.parsed || r.page)) throw error;
+    for (const p of retry) out.set(urlKey(p.url), { url: p.url, error: error instanceof Error ? error.message : String(error) });
+    return out;
+  }
+  for (const p of retry) {
+    for (const t of tries.filter((x) => x.feed === p.url)) {
+      const content = second.get(urlKey(t.url))?.content;
+      if (content === undefined) continue;
+      try {
+        const parsed = parseAnyFeed(content);
+        if (parsed.items.length) {
+          out.set(urlKey(p.url), { url: p.url, parsed, via: t.route });
+          break;
+        }
+      } catch {
+        // try the next route
+      }
+    }
+  }
+  return out;
+}
+
 /**
  * The address given was an ordinary page, not a feed: look for the site's feed.
  * Tries feed links on that page, the usual feed addresses, then any "RSS feeds"
  * page it links to. Only paths the site's robots.txt allows are fetched.
- * Costs one or two connector calls.
+ * Costs one to four connector calls.
  */
 export async function findFeedOnSite(
   mcp: McpNs,
   pageUrl: string,
   pageContent: string,
   robots: FetchResult | undefined,
-): Promise<{ url: string; parsed: ParsedFeed } | null> {
+): Promise<{ url: string; parsed: ParsedFeed; via?: FeedRoute } | null> {
   const origin = new URL(pageUrl).origin;
   // robots.txt per host: this site's is known; others (e.g. FeedBurner) are fetched before use.
   const robotsByOrigin = new Map<string, FetchResult | undefined>([[origin, robots]]);
   const allowed = (u: string) => robotsVerdict(u, robotsByOrigin.get(new URL(u).origin)).allowed;
   const tried = new Set<string>([urlKey(pageUrl)]);
-  const found: { url: string; parsed: ParsedFeed }[] = [];
+  const found: { url: string; parsed: ParsedFeed; via?: FeedRoute }[] = [];
   const learnRobots = async (urls: string[]) => {
     const missing = [...new Set(urls.map((u) => new URL(u).origin))].filter((o) => !robotsByOrigin.has(o));
     if (!missing.length) return;
@@ -733,23 +847,20 @@ export async function findFeedOnSite(
     for (const o of missing) robotsByOrigin.set(o, fetched.get(urlKey(`${o}/robots.txt`)));
   };
 
-  async function tryBatch(urls: string[]): Promise<Map<string, FetchResult>> {
+  async function tryBatch(urls: string[]): Promise<Map<string, FeedRead>> {
     await learnRobots(urls.filter((u) => !tried.has(urlKey(u))));
     const batch = urls.filter((u) => !tried.has(urlKey(u)) && allowed(u)).slice(0, 20);
     batch.forEach((u) => tried.add(urlKey(u)));
     if (!batch.length) return new Map();
-    const fetched = await fetchUrls(mcp, batch, FEED_OBJECTIVE, { detail: true });
-    for (const u of batch) {
-      const content = fetched.get(urlKey(u))?.content;
-      if (!content) continue;
-      try {
-        const parsed = parseFetchedFeed(content);
-        if (parsed.items.length) found.push({ url: u, parsed });
-      } catch {
-        // a page, not a feed
-      }
+    const reads = await readFeeds(
+      mcp,
+      batch.map((url) => ({ url })),
+      { detail: true, fallback: isFeedishUrl },
+    );
+    for (const read of reads.values()) {
+      if (read.parsed?.items.length) found.push({ url: read.url, parsed: read.parsed, via: read.via });
     }
-    return fetched;
+    return reads;
   }
 
   // 1. Feed links on the page, and pages about feeds ("RSS Feeds" links, /feeds).
@@ -758,7 +869,7 @@ export async function findFeedOnSite(
   const first = await tryBatch([...links.feeds, ...feedPages]);
   // 2. The feeds those pages list.
   const listed = feedPages.flatMap((p) => {
-    const content = first.get(urlKey(p))?.content;
+    const content = first.get(urlKey(p))?.page;
     return content ? feedLinksInPage(content, p).feeds : [];
   });
   if (listed.length) await tryBatch(listed);
@@ -816,9 +927,9 @@ export function checkFeeds(feedIds?: string[]): Promise<CheckSummary> {
         ]),
       );
       const allowed = feeds.filter((f) => verdicts.get(f.id)?.allowed);
-      let fetched = new Map<string, FetchResult>();
+      let reads = new Map<string, FeedRead>();
       try {
-        if (allowed.length) fetched = await fetchUrls(mcp, allowed.map((f) => f.url), FEED_OBJECTIVE);
+        if (allowed.length) reads = await readFeeds(mcp, allowed.map((f) => ({ url: f.url, via: f.via })), { detail: true });
       } catch (error) {
         await noteCheckFailure();
         throw error;
@@ -853,17 +964,21 @@ export function checkFeeds(feedIds?: string[]): Promise<CheckSummary> {
           problems.push({ feed: feed.name, message: verdict.reason });
           continue;
         }
-        const res = fetched.get(urlKey(feed.url));
-        if (!res || res.content === undefined) {
-          fail(feed, res?.status ? `The feed returned HTTP ${res.status}` : `Couldn't fetch the feed (${res?.error ?? "no response"})`);
-          continue;
-        }
-        try {
-          const added = ingest(feed, parseFetchedFeed(res.content));
-          results.set(feed.id, { last_status: "ok", last_error: null, last_new_items: added, last_fetched_at: at, robots_ok_at: robotsOkAt(feed) });
-        } catch (error) {
-          if (error instanceof NotAFeedError) pages.push({ feed, content: res.content });
-          else fail(feed, error instanceof Error ? error.message : String(error));
+        const read = reads.get(urlKey(feed.url));
+        if (read?.parsed) {
+          const added = ingest(feed, read.parsed);
+          results.set(feed.id, {
+            last_status: "ok",
+            last_error: null,
+            last_new_items: added,
+            last_fetched_at: at,
+            robots_ok_at: robotsOkAt(feed),
+            via: read.via ?? null,
+          });
+        } else if (read?.page !== undefined) {
+          pages.push({ feed, content: read.page });
+        } else {
+          fail(feed, readFailure(read));
         }
       }
 
@@ -883,7 +998,15 @@ export function checkFeeds(feedIds?: string[]): Promise<CheckSummary> {
         });
         if (found) {
           const added = ingest(feed, found.parsed);
-          results.set(feed.id, { url: found.url, last_status: "ok", last_error: null, last_new_items: added, last_fetched_at: at, robots_ok_at: at });
+          results.set(feed.id, {
+            url: found.url,
+            last_status: "ok",
+            last_error: null,
+            last_new_items: added,
+            last_fetched_at: at,
+            robots_ok_at: at,
+            via: found.via ?? null,
+          });
         } else {
           fail(feed, `No RSS feed found on ${new URL(feed.url).hostname}. Look for an RSS link on the site and paste that address instead.`);
         }
@@ -938,20 +1061,16 @@ export async function previewFeed(url: string) {
   const robots = (await fetchUrls(mcp, [robotsUrl], "The robots.txt rules for crawlers")).get(urlKey(robotsUrl));
   const verdict = robotsVerdict(url, robots);
   if (!verdict.allowed) return { ok: false as const, blockedByRobots: true, error: verdict.reason };
-  const res = (await fetchUrls(mcp, [url], FEED_OBJECTIVE)).get(urlKey(url));
-  if (!res || res.content === undefined) {
-    return { ok: false as const, blockedByRobots: false, error: res?.status ? `The feed returned HTTP ${res.status}` : "Couldn't fetch that URL" };
-  }
+  const read = (await readFeeds(mcp, [{ url }], { detail: true })).get(urlKey(url));
 
   let feedUrl = url;
   let parsed: ParsedFeed;
-  try {
-    parsed = parseFetchedFeed(res.content);
-  } catch (error) {
-    if (!(error instanceof NotAFeedError)) {
-      return { ok: false as const, blockedByRobots: false, error: error instanceof Error ? error.message : String(error) };
-    }
-    const found = await findFeedOnSite(mcp, url, res.content, robots);
+  let via: FeedRoute | undefined;
+  if (read?.parsed) {
+    parsed = read.parsed;
+    via = read.via;
+  } else if (read?.page !== undefined) {
+    const found = await findFeedOnSite(mcp, url, read.page, robots);
     if (!found) {
       return {
         ok: false as const,
@@ -961,6 +1080,9 @@ export async function previewFeed(url: string) {
     }
     feedUrl = found.url;
     parsed = found.parsed;
+    via = found.via;
+  } else {
+    return { ok: false as const, blockedByRobots: false, error: readFailure(read) };
   }
 
   const drafts = parsed.items
@@ -970,6 +1092,7 @@ export async function previewFeed(url: string) {
     ok: true as const,
     feedUrl,
     resolved: feedUrl !== url,
+    via: via ?? null,
     title: parsed.title,
     itemCount: parsed.items.length,
     openCount: drafts.length,

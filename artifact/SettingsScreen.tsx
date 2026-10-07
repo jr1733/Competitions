@@ -39,6 +39,7 @@ import {
   winsResource,
 } from "./data";
 import { discoverFeeds, type FeedCandidate } from "./discover";
+import { ROUTE_LABEL } from "./readers";
 import { useResource } from "./resource";
 
 function Section({ id, title, children, description }: { id: string; title: string; description?: ReactNode; children: ReactNode }) {
@@ -158,7 +159,7 @@ function AddFeedForm({ onUsedConnector }: { onUsedConnector: () => void }) {
     setSaving(true);
     try {
       const feedUrl = result?.ok ? result.feedUrl : parsed.toString();
-      const feed = await addFeed({ name: name.trim() || hostOf(feedUrl), url: feedUrl });
+      const feed = await addFeed({ name: name.trim() || hostOf(feedUrl), url: feedUrl, via: result?.ok ? result.via : null });
       setName("");
       setUrl("");
       setTerms(false);
@@ -225,7 +226,10 @@ function AddFeedForm({ onUsedConnector }: { onUsedConnector: () => void }) {
                   That address is a web page, so Comper found the site&apos;s feed: <strong>{result.feedUrl}</strong>. Add will use this.
                 </p>
               )}
-              <p className="mt-0.5 opacity-80">robots.txt allows reading it.</p>
+              <p className="mt-0.5 opacity-80">
+                robots.txt allows reading it.
+                {result.via && result.via !== "direct" ? ` Read ${ROUTE_LABEL[result.via]}, because ${FETCH_CONNECTOR} couldn't read it directly.` : ""}
+              </p>
               {!!result.sample.length && (
                 <ul className="mt-2 list-disc space-y-0.5 pl-5">
                   {result.sample.map((s: CompetitionDraft) => (
@@ -262,7 +266,7 @@ function AddFeedForm({ onUsedConnector }: { onUsedConnector: () => void }) {
 type FindState =
   | { phase: "idle" }
   | { phase: "running"; message: string }
-  | { phase: "done"; results: FeedCandidate[]; searchSkipped: boolean }
+  | { phase: "done"; results: FeedCandidate[]; directorySkipped: boolean }
   | { phase: "error"; message: string };
 
 function FindFeeds({ onUsedConnector }: { onUsedConnector: () => void }) {
@@ -275,11 +279,11 @@ function FindFeeds({ onUsedConnector }: { onUsedConnector: () => void }) {
   async function search() {
     setState({ phase: "running", message: "Starting…" });
     try {
-      const { feeds: results, searchSkipped } = await discoverFeeds(
+      const { feeds: results, directorySkipped } = await discoverFeeds(
         feeds.map((f) => f.url),
         (message) => setState({ phase: "running", message }),
       );
-      setState({ phase: "done", results, searchSkipped });
+      setState({ phase: "done", results, directorySkipped });
     } catch (error) {
       setState({ phase: "error", message: errorText(error) });
     } finally {
@@ -290,7 +294,7 @@ function FindFeeds({ onUsedConnector }: { onUsedConnector: () => void }) {
   async function add(candidate: FeedCandidate) {
     setAdding(candidate.url);
     try {
-      const feed = await addFeed({ name: candidate.title, url: candidate.url });
+      const feed = await addFeed({ name: candidate.title, url: candidate.url, via: candidate.via });
       toast(`Added ${candidate.title}. Checking it now…`);
       reportCheck(await checkFeeds([feed.id]));
     } catch (error) {
@@ -310,8 +314,8 @@ function FindFeeds({ onUsedConnector }: { onUsedConnector: () => void }) {
         <div className="min-w-0 flex-1">
           <h3 className="font-semibold">Find feeds for me</h3>
           <p className="mt-0.5 text-sm text-zinc-500 dark:text-zinc-400">
-            Searches the web for UK competition sites, checks each site&apos;s robots.txt, and shows the feeds it finds. Nothing is added
-            until you choose.
+            Searches Feedly&apos;s directory of RSS feeds for UK competition feeds, checks each site&apos;s robots.txt, and reads the
+            feeds it allows so you can see what&apos;s in them. Nothing is added until you choose.
           </p>
         </div>
       </div>
@@ -336,9 +340,9 @@ function FindFeeds({ onUsedConnector }: { onUsedConnector: () => void }) {
         </p>
       )}
 
-      {state.phase === "done" && state.searchSkipped && (
+      {state.phase === "done" && state.directorySkipped && (
         <p className="mt-3 text-sm text-amber-700 dark:text-amber-400" role="status">
-          The web search didn&apos;t answer this time, so Comper checked well-known UK comping sites only. Search again later for more.
+          Feedly&apos;s feed directory didn&apos;t answer this time, so Comper looked on UK comping sites instead. Search again later for more.
         </p>
       )}
 
@@ -359,9 +363,20 @@ function FindFeeds({ onUsedConnector }: { onUsedConnector: () => void }) {
                   <div className="min-w-0 flex-1">
                     <div className="font-semibold leading-snug">{c.title}</div>
                     <div className="truncate text-xs text-zinc-500">{c.url.replace(/^https?:\/\//, "")}</div>
-                    <div className="mt-1 text-sm text-emerald-700 dark:text-emerald-400">
-                      {c.openCount} open of {c.itemCount} items
-                    </div>
+                    {c.verified ? (
+                      <div className="mt-1 text-sm text-emerald-700 dark:text-emerald-400">
+                        {c.openCount} open of {c.itemCount} items
+                        {c.via && c.via !== "direct" ? <span className="text-zinc-500"> · read {ROUTE_LABEL[c.via]}</span> : null}
+                      </div>
+                    ) : (
+                      <div className="mt-1 text-sm text-amber-700 dark:text-amber-400">Couldn&apos;t preview it right now</div>
+                    )}
+                    {c.description && <p className="mt-1 line-clamp-2 text-sm text-zinc-600 dark:text-zinc-300">{c.description}</p>}
+                    {!!c.followers && (
+                      <div className="mt-0.5 text-xs text-zinc-500">
+                        {c.followers.toLocaleString("en-GB")} Feedly follower{c.followers === 1 ? "" : "s"}
+                      </div>
+                    )}
                     {c.sample.length > 0 && (
                       <ul className="mt-1 list-disc pl-5 text-sm text-zinc-600 dark:text-zinc-300">
                         {c.sample.map((prize) => (

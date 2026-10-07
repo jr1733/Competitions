@@ -1,16 +1,18 @@
 import { itemToCompetition, type CompetitionDraft } from "@/lib/feed/normalise";
 import { capability, type McpError, type McpNs } from "./claude";
-import { callConnector, ConnectorProblem, connectorMessage, fetchUrls, robotsVerdict, urlKey } from "./data";
-import { COMMON_FEED_PAGES, COMMON_FEED_PATHS, feedLinksInPage, looksLikeCompetitions, parseFetchedFeed } from "./fetched-feed";
+import { callConnector, ConnectorProblem, connectorMessage, fetchUrls, readFeeds, robotsVerdict, urlKey } from "./data";
+import { COMMON_FEED_PAGES, COMMON_FEED_PATHS, feedLinksInPage, isFeedishUrl, looksLikeCompetitions } from "./fetched-feed";
+import { feedlySearchUrl, parseDirectory, routeUrl, type DirectoryHit, type FeedRoute } from "./readers";
 import type { ParsedFeed } from "@/lib/feed/parse";
 
 export { looksLikeCompetitions };
 
 /**
- * "Find feeds for me": search the web for UK competition sites, then look
- * for their RSS feeds. Only feed URLs are fetched (never ordinary pages), and
- * only on sites whose robots.txt allows it. Nothing is saved: the viewer picks
- * which feeds to add.
+ * "Find feeds for me": search Feedly's public directory of RSS feeds for UK
+ * competition feeds, check each site's robots.txt, then read the feeds it
+ * allows to show what's in them. If the directory can't be searched, fall
+ * back to looking for feeds on UK comping sites themselves. Nothing is
+ * saved: the viewer picks which feeds to add.
  */
 
 export const SEARCH_TOOL = "web_search";
@@ -26,9 +28,16 @@ export interface FeedCandidate {
   title: string;
   site: string;
   siteUrl: string;
+  /** The feed was read just now, so the counts and sample are real. */
+  verified: boolean;
+  /** How it was read. */
+  via: FeedRoute | null;
   itemCount: number;
   openCount: number;
   sample: string[];
+  /** From the feed directory, when found there. */
+  description?: string;
+  followers?: number;
 }
 
 // Sites that are never competition feeds.
@@ -112,14 +121,143 @@ export const KNOWN_SITES = [
   "https://winninguk.co.uk",
 ];
 
-const FEED_OBJECTIVE = "Every item in this RSS feed: title, link, published date and description";
-
-const STOP_CODES = new Set(["not_granted", "capability_disabled", "capability_removed", "not_in_manifest", "server_not_connected", "server_not_found", "needs_reauth", "selection_required", "blocked_by_policy", "approval_required"]);
+const STOP_CODES = new Set(["rate_limited", "not_granted", "capability_disabled", "capability_removed", "not_in_manifest", "server_not_connected", "server_not_found", "needs_reauth", "selection_required", "blocked_by_policy", "approval_required"]);
 
 export interface DiscoveryResult {
   feeds: FeedCandidate[];
-  /** The web search failed, so only the well-known sites were checked. */
-  searchSkipped: boolean;
+  /** Feedly's directory couldn't be searched, so only comping sites themselves were checked. */
+  directorySkipped: boolean;
+}
+
+const bareHost = (host: string) => host.toLowerCase().replace(/^www\./, "");
+
+/** Searches of Feedly's directory: topics, then each well-known site by name. */
+export const DIRECTORY_QUERIES = ["uk competitions", "comping", "win prizes uk", "giveaways uk", "prize draw", "competitions blog"];
+
+export function directorySearchUrls(): string[] {
+  return [
+    ...DIRECTORY_QUERIES.map((q) => feedlySearchUrl(q, 10)),
+    ...KNOWN_SITES.map((site) => feedlySearchUrl(bareHost(new URL(site).hostname), 5)),
+  ];
+}
+
+const DIRECTORY_OBJECTIVE = "Every feed in this list: feedId, title, website, description, subscribers, lastUpdated";
+
+const COMPETITION_TEXT = /\b(competitions?|comps?|comping|compers?|giveaways?|prizes?|prize draws?|sweepstakes?|win)\b/i;
+
+/**
+ * Directory results worth reading: English, still updated in the last 90
+ * days, about competitions (or from a well-known comping site), not already
+ * added. Well-known sites first, then UK ones, then by followers.
+ */
+export function pickDirectoryHits(hits: DirectoryHit[], existing: Set<string>, max = 15, nowMs = Date.now()): DirectoryHit[] {
+  const known = new Set(KNOWN_SITES.map((s) => bareHost(new URL(s).hostname)));
+  const seen = new Set<string>();
+  const scored: { hit: DirectoryHit; score: number }[] = [];
+  for (const hit of hits) {
+    let host: string;
+    let siteHost: string;
+    try {
+      host = bareHost(new URL(hit.feedUrl).hostname);
+      siteHost = hit.website ? bareHost(new URL(hit.website).hostname) : host;
+    } catch {
+      continue;
+    }
+    if (SKIP_HOSTS.test(host) || SKIP_HOSTS.test(siteHost)) continue;
+    const key = urlKey(hit.feedUrl);
+    if (seen.has(key) || existing.has(key)) continue;
+    seen.add(key);
+    if (hit.language && !/^en/i.test(hit.language)) continue;
+    if (hit.lastUpdated && nowMs - hit.lastUpdated > 90 * 86_400_000) continue;
+    const isKnown = known.has(host) || known.has(siteHost);
+    const text = `${hit.title} ${hit.description} ${hit.website ?? ""} ${hit.feedUrl}`;
+    if (!isKnown && !COMPETITION_TEXT.test(text)) continue;
+    const uk = /\.uk\b|\buk\b|\bbritish\b|\bbritain\b/i.test(text);
+    scored.push({ hit, score: (isKnown ? 1e9 : 0) + (uk ? 1e8 : 0) + Math.min(hit.subscribers, 1e7) });
+  }
+  return scored
+    .sort((a, b) => b.score - a.score)
+    .slice(0, max)
+    .map((s) => s.hit);
+}
+
+/** Search Feedly's directory (one call; one more through Jina Reader if Parallel can't read Feedly's answer). */
+async function searchDirectory(mcp: McpNs): Promise<DirectoryHit[]> {
+  const urls = directorySearchUrls();
+  const collect = (fetched: Map<string, { content?: string }>, asked: string[]) =>
+    asked.flatMap((u) => {
+      const content = fetched.get(urlKey(u))?.content;
+      return content ? parseDirectory(content) : [];
+    });
+  let hits = collect(await fetchUrls(mcp, urls, DIRECTORY_OBJECTIVE, { detail: true }), urls);
+  if (!hits.length) {
+    const viaJina = urls.map((u) => routeUrl("jina", u));
+    hits = collect(await fetchUrls(mcp, viaJina, DIRECTORY_OBJECTIVE, { detail: true }), viaJina);
+  }
+  return hits;
+}
+
+function candidate(
+  url: string,
+  parsed: ParsedFeed | undefined,
+  via: FeedRoute | null,
+  extra: { title?: string; siteUrl?: string | null; description?: string; followers?: number } = {},
+): FeedCandidate {
+  const siteUrl = extra.siteUrl ?? originOf(url);
+  const site = bareHost(new URL(siteUrl).hostname);
+  const title = (extra.title || parsed?.title || site).slice(0, 80);
+  const drafts = (parsed?.items ?? [])
+    .map((item) => itemToCompetition(item, { id: null, name: title }))
+    .filter((d): d is CompetitionDraft => d !== null);
+  return {
+    url,
+    title,
+    site,
+    siteUrl,
+    verified: !!parsed,
+    via,
+    itemCount: parsed?.items.length ?? 0,
+    openCount: drafts.length,
+    sample: drafts.slice(0, 3).map((d) => d.prize),
+    description: extra.description ? extra.description.slice(0, 200) : undefined,
+    followers: extra.followers,
+  };
+}
+
+/**
+ * Check robots.txt for each directory hit's site, then read the feeds it
+ * allows (through Feedly first, since it found them). Feeds that read but
+ * aren't about competitions are dropped; ones that couldn't be read are kept,
+ * unverified, so they can still be added.
+ */
+async function readDirectoryHits(mcp: McpNs, hits: DirectoryHit[], onProgress: (message: string) => void): Promise<FeedCandidate[]> {
+  const origins = [...new Set(hits.map((h) => originOf(h.feedUrl)))];
+  onProgress(`Found ${hits.length} likely feeds. Checking robots.txt on ${origins.length} sites…`);
+  const robots = await fetchUrls(mcp, origins.map((o) => `${o}/robots.txt`), "The robots.txt rules for crawlers");
+  const allowed = hits.filter((h) => robotsVerdict(h.feedUrl, robots.get(urlKey(`${originOf(h.feedUrl)}/robots.txt`))).allowed);
+  if (!allowed.length) return [];
+
+  onProgress(`Reading ${allowed.length} feed${allowed.length === 1 ? "" : "s"}…`);
+  const reads = await readFeeds(
+    mcp,
+    allowed.map((h) => ({ url: h.feedUrl })),
+    { detail: true, first: "feedly", count: 10, maxFallback: 6 },
+  );
+  const out: FeedCandidate[] = [];
+  for (const hit of allowed) {
+    const read = reads.get(urlKey(hit.feedUrl));
+    const parsed = read?.parsed?.items.length ? read.parsed : undefined;
+    if (parsed && !looksLikeCompetitions(parsed.items.map((i) => i.title))) continue;
+    out.push(
+      candidate(hit.feedUrl, parsed, parsed ? (read?.via ?? null) : null, {
+        title: hit.title,
+        siteUrl: hit.website,
+        description: hit.description,
+        followers: hit.subscribers,
+      }),
+    );
+  }
+  return out;
 }
 
 export async function discoverFeeds(existingUrls: string[], onProgress: (message: string) => void): Promise<DiscoveryResult> {
@@ -127,15 +265,34 @@ export async function discoverFeeds(existingUrls: string[], onProgress: (message
   if (!mcp) throw new ConnectorProblem("not_granted", "Connectors aren't available in this view of Comper. Open it in Claude.");
   const existing = new Set(existingUrls.map(urlKey));
 
+  onProgress("Searching Feedly's directory of RSS feeds…");
+  let directorySkipped = false;
+  let found: FeedCandidate[] = [];
+  try {
+    const hits = pickDirectoryHits(await searchDirectory(mcp), existing);
+    if (hits.length) found = await readDirectoryHits(mcp, hits, onProgress);
+    else directorySkipped = true;
+  } catch (error) {
+    if (error instanceof ConnectorProblem && STOP_CODES.has(error.code)) throw error;
+    directorySkipped = true;
+  }
+  if (!found.length) {
+    found = await discoverOnSites(mcp, existing, onProgress);
+    directorySkipped = true;
+  }
+  const order = (c: FeedCandidate) => (c.verified ? 1e9 : 0) + c.openCount * 1e4 + Math.min(c.followers ?? 0, 9999);
+  return { feeds: found.sort((a, b) => order(b) - order(a)), directorySkipped };
+}
+
+/** The fallback: look for feeds on UK comping sites (from a web search and the well-known list). */
+async function discoverOnSites(mcp: McpNs, existing: Set<string>, onProgress: (message: string) => void): Promise<FeedCandidate[]> {
   onProgress("Searching the web for UK competition sites…");
   // The search is a bonus: if it fails, carry on with the well-known sites.
   let hits: SearchHit[] = [];
-  let searchSkipped = false;
   try {
     hits = await searchWeb(mcp);
   } catch (error) {
     if (error instanceof ConnectorProblem && STOP_CODES.has(error.code)) throw error;
-    searchSkipped = true;
   }
   const { origins, direct } = candidatesFromSearch(hits);
   const sites = [...new Set([...KNOWN_SITES, ...origins, ...direct.map(originOf)])].slice(0, 12);
@@ -155,22 +312,21 @@ export async function discoverFeeds(existingUrls: string[], onProgress: (message
   };
 
   const tried = new Set<string>();
-  const feeds: { url: string; parsed: ParsedFeed }[] = [];
+  const feeds: { url: string; parsed: ParsedFeed; via: FeedRoute | null }[] = [];
   const pages = new Map<string, string>();
   const probe = async (urls: string[]) => {
     const batch = urls.filter((u) => !tried.has(urlKey(u)) && allowed(u));
     batch.forEach((u) => tried.add(urlKey(u)));
     if (!batch.length) return;
-    const fetched = await fetchUrls(mcp, batch, FEED_OBJECTIVE, { detail: true });
-    for (const u of batch) {
-      const content = fetched.get(urlKey(u))?.content;
-      if (!content) continue;
-      try {
-        const parsed = parseFetchedFeed(content);
-        if (parsed.items.length) feeds.push({ url: u, parsed });
-      } catch {
-        pages.set(u, content);
-      }
+    // Addresses that look like feeds but can't be read directly are read through the feed readers.
+    const reads = await readFeeds(
+      mcp,
+      batch.map((url) => ({ url })),
+      { detail: true, fallback: isFeedishUrl },
+    );
+    for (const read of reads.values()) {
+      if (read.parsed?.items.length) feeds.push({ url: read.url, parsed: read.parsed, via: read.via ?? null });
+      else if (read.page !== undefined) pages.set(read.url, read.page);
     }
   };
   const sitesWithFeeds = () => new Set(feeds.map((f) => originOf(f.url)));
@@ -194,33 +350,12 @@ export async function discoverFeeds(existingUrls: string[], onProgress: (message
     await probe(remaining.flatMap((o) => COMMON_FEED_PATHS.slice(0, 2).map((p) => o + p)));
   }
 
-  const found: (FeedCandidate & { signature: string })[] = [];
-  for (const { url, parsed } of feeds) {
+  // /feed/ and /rss are often the same feed: keep one per site and content.
+  const unique = new Map<string, FeedCandidate>();
+  for (const { url, parsed, via } of feeds) {
     if (!looksLikeCompetitions(parsed.items.map((i) => i.title))) continue;
-    const site = new URL(url).hostname.replace(/^www\./, "");
-    const drafts = parsed.items
-      .map((item) => itemToCompetition(item, { id: null, name: parsed.title || site }))
-      .filter((d): d is CompetitionDraft => d !== null);
-    found.push({
-      url,
-      title: (parsed.title || site).slice(0, 80),
-      site,
-      siteUrl: originOf(url),
-      itemCount: parsed.items.length,
-      openCount: drafts.length,
-      sample: drafts.slice(0, 3).map((d) => d.prize),
-      // /feed/ and /rss are often the same feed: keep one per site and content.
-      signature: `${site}|${parsed.items[0]?.link ?? ""}`,
-    });
+    const signature = `${bareHost(new URL(url).hostname)}|${parsed.items[0]?.link ?? ""}`;
+    if (!unique.has(signature)) unique.set(signature, candidate(url, parsed, via));
   }
-
-  const unique = new Map<string, FeedCandidate & { signature: string }>();
-  for (const c of found) if (!unique.has(c.signature)) unique.set(c.signature, c);
-  const feedsFound = [...unique.values()]
-    .map(({ signature: _signature, ...c }) => {
-      void _signature;
-      return c;
-    })
-    .sort((a, b) => b.openCount - a.openCount);
-  return { feeds: feedsFound, searchSkipped };
+  return [...unique.values()];
 }
