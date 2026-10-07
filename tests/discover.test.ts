@@ -51,14 +51,15 @@ describe("looksLikeCompetitions", () => {
 describe("connectorMessage", async () => {
   const { connectorMessage } = await import("../artifact/data");
   it("explains the free-tier limit however it arrives", () => {
-    expect(connectorMessage({ code: "upstream_error", message: "You've hit the free-tier rate limit for Parallel Search MCP." })).toMatch(/run out of free requests/);
+    expect(connectorMessage({ code: "upstream_error", message: "You've hit the free-tier rate limit for Parallel Search MCP." })).toMatch(/over its free usage limit/);
     expect(
       connectorMessage({ code: "tool_error", message: "Tool failed", result: { content: [{ type: "text", text: "429 Too Many Requests" }] } } as never),
-    ).toMatch(/run out of free requests/);
+    ).toMatch(/over its free usage limit/);
   });
   it("turns the generic platform error into something actionable", () => {
     const text = connectorMessage({ code: "upstream_error", message: "Connector call failed" });
-    expect(text).toMatch(/free request limit/);
+    expect(text).toMatch(/free, shared service/);
+    expect(text).not.toMatch(/API key/);
     expect(text).toMatch(/\[upstream_error\]/);
   });
   it("keeps specific fixes for specific codes", () => {
