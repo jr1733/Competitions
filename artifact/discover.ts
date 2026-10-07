@@ -114,13 +114,30 @@ export const KNOWN_SITES = [
 
 const FEED_OBJECTIVE = "Every item in this RSS feed: title, link, published date and description";
 
-export async function discoverFeeds(existingUrls: string[], onProgress: (message: string) => void): Promise<FeedCandidate[]> {
+const STOP_CODES = new Set(["not_granted", "capability_disabled", "capability_removed", "not_in_manifest", "server_not_connected", "server_not_found", "needs_reauth", "selection_required", "blocked_by_policy", "approval_required"]);
+
+export interface DiscoveryResult {
+  feeds: FeedCandidate[];
+  /** The web search failed, so only the well-known sites were checked. */
+  searchSkipped: boolean;
+}
+
+export async function discoverFeeds(existingUrls: string[], onProgress: (message: string) => void): Promise<DiscoveryResult> {
   const mcp = await capability("mcp");
   if (!mcp) throw new ConnectorProblem("not_granted", "Connectors aren't available in this view of Comper. Open it in Claude.");
   const existing = new Set(existingUrls.map(urlKey));
 
   onProgress("Searching the web for UK competition sites…");
-  const { origins, direct } = candidatesFromSearch(await searchWeb(mcp));
+  // The search is a bonus: if it fails, carry on with the well-known sites.
+  let hits: SearchHit[] = [];
+  let searchSkipped = false;
+  try {
+    hits = await searchWeb(mcp);
+  } catch (error) {
+    if (error instanceof ConnectorProblem && STOP_CODES.has(error.code)) throw error;
+    searchSkipped = true;
+  }
+  const { origins, direct } = candidatesFromSearch(hits);
   const sites = [...new Set([...KNOWN_SITES, ...origins, ...direct.map(originOf)])].slice(0, 12);
 
   onProgress(`Checking robots.txt on ${sites.length} sites…`);
@@ -188,10 +205,11 @@ export async function discoverFeeds(existingUrls: string[], onProgress: (message
 
   const unique = new Map<string, FeedCandidate & { signature: string }>();
   for (const c of found) if (!unique.has(c.signature)) unique.set(c.signature, c);
-  return [...unique.values()]
+  const feedsFound = [...unique.values()]
     .map(({ signature: _signature, ...c }) => {
       void _signature;
       return c;
     })
     .sort((a, b) => b.openCount - a.openCount);
+  return { feeds: feedsFound, searchSkipped };
 }

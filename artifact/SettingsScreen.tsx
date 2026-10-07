@@ -262,7 +262,7 @@ function AddFeedForm({ onUsedConnector }: { onUsedConnector: () => void }) {
 type FindState =
   | { phase: "idle" }
   | { phase: "running"; message: string }
-  | { phase: "done"; results: FeedCandidate[] }
+  | { phase: "done"; results: FeedCandidate[]; searchSkipped: boolean }
   | { phase: "error"; message: string };
 
 function FindFeeds({ onUsedConnector }: { onUsedConnector: () => void }) {
@@ -275,11 +275,11 @@ function FindFeeds({ onUsedConnector }: { onUsedConnector: () => void }) {
   async function search() {
     setState({ phase: "running", message: "Starting…" });
     try {
-      const results = await discoverFeeds(
+      const { feeds: results, searchSkipped } = await discoverFeeds(
         feeds.map((f) => f.url),
         (message) => setState({ phase: "running", message }),
       );
-      setState({ phase: "done", results });
+      setState({ phase: "done", results, searchSkipped });
     } catch (error) {
       setState({ phase: "error", message: errorText(error) });
     } finally {
@@ -333,6 +333,12 @@ function FindFeeds({ onUsedConnector }: { onUsedConnector: () => void }) {
       {state.phase === "error" && (
         <p className="mt-3 rounded-xl bg-red-50 p-3 text-sm text-red-800 dark:bg-red-950/60 dark:text-red-200" role="alert">
           {state.message}
+        </p>
+      )}
+
+      {state.phase === "done" && state.searchSkipped && (
+        <p className="mt-3 text-sm text-amber-700 dark:text-amber-400" role="status">
+          The web search didn&apos;t answer this time, so Comper checked well-known UK comping sites only. Search again later for more.
         </p>
       )}
 
