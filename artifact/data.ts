@@ -8,7 +8,8 @@ import { dedupeByUrl, itemToCompetition, type CompetitionDraft } from "@/lib/fee
 import { normaliseUrl } from "@/lib/feed/url";
 import type { Competition, EntryStatus, EntryWithCompetition, Feed, FeedStatus, Win } from "@/lib/types";
 import { capability, FETCH_CONNECTOR, FETCH_TOOL, type CollectionRef, type DocRef, type McpError, type McpNs } from "./claude";
-import { parseFetchedFeed } from "./fetched-feed";
+import { COMMON_FEED_PAGES, COMMON_FEED_PATHS, feedLinksInPage, looksLikeCompetitions, parseFetchedFeed } from "./fetched-feed";
+import { NotAFeedError, type ParsedFeed } from "@/lib/feed/parse";
 import { Resource } from "./resource";
 
 /**
@@ -547,6 +548,60 @@ export function robotsVerdict(feedUrl: string, robots: FetchResult | undefined):
   return { allowed: false, reason: `robots.txt unavailable (${robots.status ? `HTTP ${robots.status}` : robots.error})` };
 }
 
+const FEED_OBJECTIVE = "Every item in this RSS feed: title, link, published date and description";
+
+/**
+ * The address given was an ordinary page, not a feed: look for the site's feed.
+ * Tries feed links on that page, the usual feed addresses, then any "RSS feeds"
+ * page it links to. Only paths the site's robots.txt allows are fetched.
+ * Costs one or two connector calls.
+ */
+export async function findFeedOnSite(
+  mcp: McpNs,
+  pageUrl: string,
+  pageContent: string,
+  robots: FetchResult | undefined,
+): Promise<{ url: string; parsed: ParsedFeed } | null> {
+  const origin = new URL(pageUrl).origin;
+  const allowed = (u: string) => robotsVerdict(u, robots).allowed;
+  const tried = new Set<string>([urlKey(pageUrl)]);
+  const found: { url: string; parsed: ParsedFeed }[] = [];
+
+  async function tryBatch(urls: string[]): Promise<Map<string, FetchResult>> {
+    const batch = urls.filter((u) => !tried.has(urlKey(u)) && allowed(u)).slice(0, 20);
+    batch.forEach((u) => tried.add(urlKey(u)));
+    if (!batch.length) return new Map();
+    const fetched = await fetchUrls(mcp, batch, FEED_OBJECTIVE);
+    for (const u of batch) {
+      const content = fetched.get(urlKey(u))?.content;
+      if (!content) continue;
+      try {
+        const parsed = parseFetchedFeed(content);
+        if (parsed.items.length) found.push({ url: u, parsed });
+      } catch {
+        // a page, not a feed
+      }
+    }
+    return fetched;
+  }
+
+  const links = feedLinksInPage(pageContent, pageUrl);
+  for (const p of COMMON_FEED_PAGES) if (!links.feedPages.includes(origin + p)) links.feedPages.push(origin + p);
+  const first = await tryBatch([...links.feeds, ...COMMON_FEED_PATHS.map((p) => origin + p), ...links.feedPages]);
+  if (!found.length) {
+    // Follow "RSS feeds" pages one level: they usually list the feed addresses.
+    const more = links.feedPages.flatMap((p) => {
+      const content = first.get(urlKey(p))?.content;
+      return content ? feedLinksInPage(content, p).feeds : [];
+    });
+    if (more.length) await tryBatch(more);
+  }
+  if (!found.length) return null;
+  const score = (f: { parsed: ParsedFeed }) =>
+    (looksLikeCompetitions(f.parsed.items.map((i) => i.title)) ? 10_000 : 0) + f.parsed.items.length;
+  return found.sort((a, b) => score(b) - score(a))[0];
+}
+
 export interface CheckSummary {
   newItems: number;
   checked: number;
@@ -574,14 +629,29 @@ export function checkFeeds(feedIds?: string[]): Promise<CheckSummary> {
       const robots = await fetchUrls(mcp, robotsUrls, "The robots.txt rules for crawlers");
       const verdicts = new Map(feeds.map((f) => [f.id, robotsVerdict(f.url, robots.get(urlKey(new URL("/robots.txt", f.url).toString())))]));
       const allowed = feeds.filter((f) => verdicts.get(f.id)?.allowed);
-      const fetched = allowed.length
-        ? await fetchUrls(mcp, allowed.map((f) => f.url), "Every item in this RSS feed: title, link, published date and description")
-        : new Map<string, FetchResult>();
+      const fetched = allowed.length ? await fetchUrls(mcp, allowed.map((f) => f.url), FEED_OBJECTIVE) : new Map<string, FetchResult>();
 
       const at = now();
       const results = new Map<string, Partial<Feed>>();
       const fresh: (CompetitionDraft & { id: string })[] = [];
       const problems: CheckSummary["problems"] = [];
+      const pages: { feed: Feed; content: string }[] = [];
+
+      const ingest = (feed: Feed, parsed: ParsedFeed) => {
+        const drafts = dedupeByUrl(
+          parsed.items.map((item) => itemToCompetition(item, { id: feed.id, name: feed.name })).filter((d): d is CompetitionDraft => d !== null),
+        );
+        const newOnes = drafts
+          .map((d) => ({ ...d, id: competitionId(d.url) }))
+          .filter((d) => !comps.has(d.id) && !fresh.some((f) => f.id === d.id));
+        fresh.push(...newOnes);
+        return newOnes.length;
+      };
+      const fail = (feed: Feed, message: string) => {
+        results.set(feed.id, { last_status: "error" as FeedStatus, last_error: message, last_new_items: 0, last_fetched_at: at });
+        problems.push({ feed: feed.name, message });
+      };
+
       for (const feed of feeds) {
         const verdict = verdicts.get(feed.id)!;
         if (!verdict.allowed) {
@@ -590,26 +660,34 @@ export function checkFeeds(feedIds?: string[]): Promise<CheckSummary> {
           continue;
         }
         const res = fetched.get(urlKey(feed.url));
+        if (!res || res.content === undefined) {
+          fail(feed, res?.status ? `The feed returned HTTP ${res.status}` : `Couldn't fetch the feed (${res?.error ?? "no response"})`);
+          continue;
+        }
         try {
-          if (!res || res.content === undefined) {
-            throw new Error(res?.status ? `The feed returned HTTP ${res.status}` : `Couldn't fetch the feed (${res?.error ?? "no response"})`);
-          }
-          const drafts = dedupeByUrl(
-            parseFetchedFeed(res.content)
-              .items.map((item) => itemToCompetition(item, { id: feed.id, name: feed.name }))
-              .filter((d): d is CompetitionDraft => d !== null),
-          );
-          const newOnes = drafts
-            .map((d) => ({ ...d, id: competitionId(d.url) }))
-            .filter((d) => !comps.has(d.id) && !fresh.some((f) => f.id === d.id));
-          fresh.push(...newOnes);
-          results.set(feed.id, { last_status: "ok", last_error: null, last_new_items: newOnes.length, last_fetched_at: at });
+          const added = ingest(feed, parseFetchedFeed(res.content));
+          results.set(feed.id, { last_status: "ok", last_error: null, last_new_items: added, last_fetched_at: at });
         } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          results.set(feed.id, { last_status: "error" as FeedStatus, last_error: message, last_new_items: 0, last_fetched_at: at });
-          problems.push({ feed: feed.name, message });
+          if (error instanceof NotAFeedError) pages.push({ feed, content: res.content });
+          else fail(feed, error instanceof Error ? error.message : String(error));
         }
       }
+
+      // Addresses that turned out to be ordinary pages: look for the site's feed and remember it.
+      for (const { feed, content } of pages.slice(0, 3)) {
+        const robotsResult = robots.get(urlKey(new URL("/robots.txt", feed.url).toString()));
+        const found = await findFeedOnSite(mcp, feed.url, content, robotsResult).catch((error) => {
+          if (error instanceof ConnectorProblem) throw error;
+          return null;
+        });
+        if (found) {
+          const added = ingest(feed, found.parsed);
+          results.set(feed.id, { url: found.url, last_status: "ok", last_error: null, last_new_items: added, last_fetched_at: at });
+        } else {
+          fail(feed, `No RSS feed found on ${new URL(feed.url).hostname}. Look for an RSS link on the site and paste that address instead.`);
+        }
+      }
+      for (const { feed } of pages.slice(3)) fail(feed, "This address is a web page, not an RSS feed. It will be looked into on the next check.");
 
       // Store new competitions a few at a time.
       let stored = 0;
@@ -655,21 +733,46 @@ export async function previewFeed(url: string) {
   const mcp = await capability("mcp");
   if (!mcp) throw new ConnectorProblem("not_granted", "Connectors aren't available in this view of Comper. Open it in Claude.");
   const robotsUrl = new URL("/robots.txt", url).toString();
-  const verdict = robotsVerdict(url, (await fetchUrls(mcp, [robotsUrl], "The robots.txt rules for crawlers")).get(urlKey(robotsUrl)));
+  const robots = (await fetchUrls(mcp, [robotsUrl], "The robots.txt rules for crawlers")).get(urlKey(robotsUrl));
+  const verdict = robotsVerdict(url, robots);
   if (!verdict.allowed) return { ok: false as const, blockedByRobots: true, error: verdict.reason };
-  const res = (await fetchUrls(mcp, [url], "Every item in this RSS feed: title, link, published date and description")).get(urlKey(url));
+  const res = (await fetchUrls(mcp, [url], FEED_OBJECTIVE)).get(urlKey(url));
   if (!res || res.content === undefined) {
     return { ok: false as const, blockedByRobots: false, error: res?.status ? `The feed returned HTTP ${res.status}` : "Couldn't fetch that URL" };
   }
+
+  let feedUrl = url;
+  let parsed: ParsedFeed;
   try {
-    const parsed = parseFetchedFeed(res.content);
-    const drafts = parsed.items
-      .map((item) => itemToCompetition(item, { id: null, name: parsed.title || new URL(url).hostname }))
-      .filter((d): d is CompetitionDraft => d !== null);
-    return { ok: true as const, title: parsed.title, itemCount: parsed.items.length, openCount: drafts.length, sample: drafts.slice(0, 5) };
+    parsed = parseFetchedFeed(res.content);
   } catch (error) {
-    return { ok: false as const, blockedByRobots: false, error: error instanceof Error ? error.message : String(error) };
+    if (!(error instanceof NotAFeedError)) {
+      return { ok: false as const, blockedByRobots: false, error: error instanceof Error ? error.message : String(error) };
+    }
+    const found = await findFeedOnSite(mcp, url, res.content, robots);
+    if (!found) {
+      return {
+        ok: false as const,
+        blockedByRobots: false,
+        error: `That's a web page, and no RSS feed turned up on ${new URL(url).hostname}. Look for an RSS link on the site and paste that address.`,
+      };
+    }
+    feedUrl = found.url;
+    parsed = found.parsed;
   }
+
+  const drafts = parsed.items
+    .map((item) => itemToCompetition(item, { id: null, name: parsed.title || new URL(feedUrl).hostname }))
+    .filter((d): d is CompetitionDraft => d !== null);
+  return {
+    ok: true as const,
+    feedUrl,
+    resolved: feedUrl !== url,
+    title: parsed.title,
+    itemCount: parsed.items.length,
+    openCount: drafts.length,
+    sample: drafts.slice(0, 5),
+  };
 }
 
 /** Keep the store small: drop competitions that closed 30+ days ago unless you entered or won them. */

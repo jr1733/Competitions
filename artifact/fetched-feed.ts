@@ -77,3 +77,75 @@ function stripMarkdownLink(text: string): string {
 function unescapeMarkdown(text: string): string {
   return text.replace(/\\([\\`*_{}[\]()#+\-.!|>~])/g, "$1");
 }
+
+// ---------------------------------------------------------------------------
+// Finding a site's feed from one of its pages
+// ---------------------------------------------------------------------------
+
+const COMPETITION_WORDS = /\b(win|wins|won|competition|comp|giveaway|prize|prizes|draw|sweepstakes?|enter)\b/i;
+
+/** A feed counts as a competition feed when at least 30% of its items read like competitions. */
+export function looksLikeCompetitions(titles: string[]): boolean {
+  if (!titles.length) return false;
+  return titles.filter((t) => COMPETITION_WORDS.test(t)).length / titles.length >= 0.3;
+}
+
+const FEEDISH_PATH = /\/feed\/?$|\/rss(?:\/|\.xml|$)|\.(?:xml|rss|atom)$|\/atom(?:\/|\.xml|$)/i;
+const FEEDISH_QUERY = /[?&](?:feed|format|type)=(?:rss|atom)/i;
+const FEED_WORDS = /\b(rss|feeds?|atom)\b/i;
+
+/** Does this address look like a feed rather than a page? */
+export function isFeedishUrl(url: string): boolean {
+  try {
+    const u = new URL(url);
+    return FEEDISH_PATH.test(u.pathname) || FEEDISH_QUERY.test(u.search);
+  } catch {
+    return false;
+  }
+}
+
+function sameSite(a: string, b: string): boolean {
+  const base = (h: string) => h.toLowerCase().replace(/^www\./, "");
+  const ha = base(a);
+  const hb = base(b);
+  return ha === hb || ha.endsWith(`.${hb}`) || hb.endsWith(`.${ha}`);
+}
+
+/**
+ * Links on a fetched page (markdown or plain text) that lead to this site's
+ * feeds: `feeds` look like feed addresses; `feedPages` are pages about feeds
+ * (e.g. "RSS Feeds" in a footer) that may list them.
+ */
+export function feedLinksInPage(content: string, pageUrl: string): { feeds: string[]; feedPages: string[] } {
+  const page = new URL(pageUrl);
+  const feeds: string[] = [];
+  const feedPages: string[] = [];
+  const consider = (raw: string, text: string) => {
+    let url: URL;
+    try {
+      url = new URL(raw.replace(/[.,;]+$/, ""), page);
+    } catch {
+      return;
+    }
+    if ((url.protocol !== "https:" && url.protocol !== "http:") || !sameSite(url.hostname, page.hostname)) return;
+    url.hash = "";
+    const href = url.toString();
+    if (href === page.toString()) return;
+    if (isFeedishUrl(href)) {
+      if (!feeds.includes(href)) feeds.push(href);
+    } else if ((FEED_WORDS.test(text) || FEED_WORDS.test(url.pathname)) && !feedPages.includes(href)) {
+      feedPages.push(href);
+    }
+  };
+  for (const m of content.matchAll(/\[([^\]]*)\]\(\s*<?([^)\s>]+)>?(?:\s+"[^"]*")?\s*\)/g)) consider(m[2], m[1]);
+  // Links wrapped round an icon, e.g. [![RSS](icon.png)](/rss/new.xml): take every "](href)".
+  for (const m of content.matchAll(/\]\(\s*<?([^)\s>]+)>?(?:\s+"[^"]*")?\s*\)/g)) consider(m[1], "");
+  for (const m of content.matchAll(/https?:\/\/[^\s<>"'()[\]|]+/g)) consider(m[0], "");
+  return { feeds: feeds.slice(0, 10), feedPages: feedPages.slice(0, 3) };
+}
+
+/** Where most sites keep their main feed, tried when a page doesn't link one. */
+export const COMMON_FEED_PATHS = ["/feed/", "/rss", "/rss.xml", "/feed.xml", "/atom.xml"];
+
+/** Pages that often list a site's feeds. */
+export const COMMON_FEED_PAGES = ["/feeds", "/rss-feeds"];

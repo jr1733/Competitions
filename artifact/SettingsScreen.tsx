@@ -157,7 +157,8 @@ function AddFeedForm({ onUsedConnector }: { onUsedConnector: () => void }) {
     }
     setSaving(true);
     try {
-      const feed = await addFeed({ name: name.trim() || hostOf(parsed.toString()), url: parsed.toString() });
+      const feedUrl = result?.ok ? result.feedUrl : parsed.toString();
+      const feed = await addFeed({ name: name.trim() || hostOf(feedUrl), url: feedUrl });
       setName("");
       setUrl("");
       setTerms(false);
@@ -219,6 +220,11 @@ function AddFeedForm({ onUsedConnector }: { onUsedConnector: () => void }) {
               <p className="font-semibold">
                 ✓ {result.title || "Feed"}: {result.itemCount} items, {result.openCount} still open
               </p>
+              {result.resolved && (
+                <p className="mt-0.5 break-all">
+                  That address is a web page, so Comper found the site&apos;s feed: <strong>{result.feedUrl}</strong>. Add will use this.
+                </p>
+              )}
               <p className="mt-0.5 opacity-80">robots.txt allows reading it.</p>
               {!!result.sample.length && (
                 <ul className="mt-2 list-disc space-y-0.5 pl-5">

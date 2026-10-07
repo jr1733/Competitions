@@ -1,7 +1,9 @@
 import { itemToCompetition, type CompetitionDraft } from "@/lib/feed/normalise";
 import { capability, FETCH_CONNECTOR, type McpError, type McpNs } from "./claude";
 import { ConnectorProblem, connectorMessage, fetchUrls, robotsVerdict, urlKey } from "./data";
-import { parseFetchedFeed } from "./fetched-feed";
+import { looksLikeCompetitions, parseFetchedFeed } from "./fetched-feed";
+
+export { looksLikeCompetitions };
 
 /**
  * "Find feeds for me": search the web for UK competition sites, then look
@@ -78,14 +80,6 @@ export function feedUrlsToTry(origins: string[], direct: string[], limit = 20): 
   direct.forEach(add);
   for (const path of COMMON_FEED_PATHS) for (const origin of origins) add(origin + path);
   return urls;
-}
-
-const COMPETITION_WORDS = /\b(win|wins|won|competition|comp|giveaway|prize|prizes|draw|sweepstakes?|enter)\b/i;
-
-/** A feed counts as a competition feed when at least 30% of its items read like competitions. */
-export function looksLikeCompetitions(titles: string[]): boolean {
-  if (!titles.length) return false;
-  return titles.filter((t) => COMPETITION_WORDS.test(t)).length / titles.length >= 0.3;
 }
 
 async function searchWeb(mcp: McpNs): Promise<SearchHit[]> {

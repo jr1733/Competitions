@@ -70,3 +70,38 @@ describe("parseFetchedFeed", () => {
     expect(() => parseFetchedFeed("# My blog\n\n## About me\nI like cats.\n\n## Contact\nEmail me.")).toThrow(NotAFeedError);
   });
 });
+
+describe("feedLinksInPage", async () => {
+  const { feedLinksInPage, isFeedishUrl } = await import("../artifact/fetched-feed");
+
+  it("finds feed links and 'RSS feeds' pages on the same site", () => {
+    const page = `# Prize Site
+
+Thousands of UK competitions.
+
+[Latest](https://www.prizes.example.com/latest) · [RSS Feeds](/feeds) · [Facebook](https://facebook.com/prizes)
+Subscribe: https://www.prizes.example.com/rss/new-competitions.xml
+[Other site feed](https://elsewhere.example.org/feed/)`;
+    expect(feedLinksInPage(page, "https://www.prizes.example.com/")).toEqual({
+      feeds: ["https://www.prizes.example.com/rss/new-competitions.xml"],
+      feedPages: ["https://www.prizes.example.com/feeds"],
+    });
+  });
+
+  it("recognises common feed addresses", () => {
+    expect(isFeedishUrl("https://blog.example.com/feed/")).toBe(true);
+    expect(isFeedishUrl("https://x.example.com/rss")).toBe(true);
+    expect(isFeedishUrl("https://x.example.com/comps.xml")).toBe(true);
+    expect(isFeedishUrl("https://x.example.com/?format=rss")).toBe(true);
+    expect(isFeedishUrl("https://x.example.com/feeds")).toBe(false);
+    expect(isFeedishUrl("https://x.example.com/")).toBe(false);
+  });
+});
+
+describe("feedLinksInPage with icon links", async () => {
+  const { feedLinksInPage } = await import("../artifact/fetched-feed");
+  it("finds feed links wrapped round icons, relative or absolute", () => {
+    const page = "* New Competitions [![RSS](/img/rss.png)](/rss/new.xml) [![Feedly](/img/feedly.png)](https://feedly.com/i/subscription/feed/x)";
+    expect(feedLinksInPage(page, "https://www.prizes.example.com/feeds").feeds).toEqual(["https://www.prizes.example.com/rss/new.xml"]);
+  });
+});
