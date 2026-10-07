@@ -36,8 +36,12 @@ async function autoCheck() {
   const permissions = await capability("permissions");
   const state = await permissions?.state(`mcp:${FETCH_CONNECTOR}`).catch(() => "unavailable" as const);
   if (state !== "granted") return;
-  const last = statsResource.getSnapshot().data?.lastCheckAt;
+  const stats = statsResource.getSnapshot().data;
+  const last = stats?.lastCheckAt;
   if (last && Date.now() - new Date(last).getTime() < CHECK_EVERY_MS) return;
+  // After a failed check, wait an hour before trying again on our own.
+  const failed = stats?.lastCheckErrorAt;
+  if (failed && Date.now() - new Date(failed).getTime() < 60 * 60 * 1000) return;
   await checkFeeds().catch(() => undefined);
 }
 

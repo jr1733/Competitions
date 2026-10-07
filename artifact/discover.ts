@@ -1,6 +1,6 @@
 import { itemToCompetition, type CompetitionDraft } from "@/lib/feed/normalise";
-import { capability, FETCH_CONNECTOR, type McpError, type McpNs } from "./claude";
-import { ConnectorProblem, connectorMessage, fetchUrls, robotsVerdict, urlKey } from "./data";
+import { capability, type McpError, type McpNs } from "./claude";
+import { callConnector, ConnectorProblem, connectorMessage, fetchUrls, robotsVerdict, urlKey } from "./data";
 import { looksLikeCompetitions, parseFetchedFeed } from "./fetched-feed";
 
 export { looksLikeCompetitions };
@@ -88,9 +88,8 @@ async function searchWeb(mcp: McpNs): Promise<SearchHit[]> {
     search_queries: ["UK competitions RSS feed", "UK comping blog free competitions", "free prize draws UK new competitions", "win prizes UK competitions list"],
   };
   try {
-    const result = await mcp.callTool(FETCH_CONNECTOR, SEARCH_TOOL, input, { cache: false });
-    const payload = (typeof result.payload === "string" ? JSON.parse(result.payload) : result.payload) as { results?: SearchHit[] } | undefined;
-    return payload?.results ?? [];
+    const payload = await callConnector<{ results?: SearchHit[] }>(mcp, SEARCH_TOOL, input);
+    return payload.results ?? [];
   } catch (error) {
     const e = error as McpError;
     throw new ConnectorProblem(e.code ?? "upstream_error", connectorMessage(e));

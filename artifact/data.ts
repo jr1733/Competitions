@@ -37,10 +37,29 @@ interface CompDoc extends Omit<Competition, "id" | "added_by"> {
   entry?: EntryState | null;
 }
 
+/** A feed as stored here: robots_ok_at remembers when robots.txt last allowed it (re-checked daily). */
+type StoredFeed = Feed & { robots_ok_at?: string | null };
+
 interface RootDoc {
-  feeds: Feed[];
+  feeds: StoredFeed[];
   last_refresh_at: string | null;
   created_at: string;
+  /** Stable id sent to the connector as `session_id`, as its free tier asks. */
+  fetch_session_id?: string;
+  /** When the last feed check failed at the connector, so automatic checks can back off. */
+  last_check_error_at?: string | null;
+}
+
+interface LogEntry {
+  at: string;
+  tool: string;
+  urls: number;
+  ok: boolean;
+  ms: number;
+  code?: string;
+  message?: string;
+  results?: number;
+  errors?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -51,7 +70,9 @@ export const feedResource = new Resource<Competition[]>("feed");
 export const entriesResource = new Resource<EntryWithCompetition[]>("entries");
 export const winsResource = new Resource<Win[]>("wins");
 export const feedsResource = new Resource<Feed[]>("feeds");
-export const statsResource = new Resource<{ competitions: number; lastCheckAt: string | null }>("stats");
+export const statsResource = new Resource<{ competitions: number; lastCheckAt: string | null; lastCheckErrorAt: string | null }>(
+  "stats",
+);
 
 let uid = "";
 let root: DocRef | null = null;
@@ -60,6 +81,8 @@ let winsCol: CollectionRef | null = null;
 let comps = new Map<string, CompDoc>();
 let rootDoc: RootDoc | null = null;
 let wins: Win[] = [];
+let logRef: DocRef | null = null;
+let log: LogEntry[] = [];
 
 function now() {
   return new Date().toISOString();
@@ -112,7 +135,9 @@ function derive() {
   const t = Date.now();
   feedResource.setState({ data: feed, error: null });
   entriesResource.setState({ data: entered, updatedAt: t, error: null });
-  statsResource.setState({ data: { competitions: comps.size, lastCheckAt: rootDoc?.last_refresh_at ?? null } });
+  statsResource.setState({
+    data: { competitions: comps.size, lastCheckAt: rootDoc?.last_refresh_at ?? null, lastCheckErrorAt: rootDoc?.last_check_error_at ?? null },
+  });
 }
 
 /** Stable document id for a competition URL, so the same competition is only ever stored once. */
@@ -147,6 +172,14 @@ export async function connect(): Promise<ConnectResult> {
     root = db.doc(`data/users/${id}/comper`);
     compsCol = root.collection("comps");
     winsCol = root.collection("wins");
+    logRef = db.doc(`data/users/${id}/comper-log`);
+    void logRef
+      .get()
+      .then((snap) => {
+        const entries = (snap.data() as { entries?: LogEntry[] } | undefined)?.entries;
+        if (Array.isArray(entries)) log = [...entries, ...log].slice(-40);
+      })
+      .catch(() => undefined);
     const first = await root.get();
     if (!first.exists) await root.set({ feeds: [], last_refresh_at: null, created_at: now() });
   } catch (error) {
@@ -208,7 +241,9 @@ function applyRoot(doc: RootDoc | null) {
   rootDoc = doc;
   feedsResource.setState({ data: doc?.feeds ?? [], updatedAt: Date.now() });
   feedResource.setState({ updatedAt: doc?.last_refresh_at ? new Date(doc.last_refresh_at).getTime() : null });
-  statsResource.setState({ data: { competitions: comps.size, lastCheckAt: doc?.last_refresh_at ?? null } });
+  statsResource.setState({
+    data: { competitions: comps.size, lastCheckAt: doc?.last_refresh_at ?? null, lastCheckErrorAt: doc?.last_check_error_at ?? null },
+  });
 }
 
 /** Change the root document. The change is applied locally straight away so the next step sees it; the snapshot confirms it. */
@@ -440,7 +475,7 @@ function connectorDetail(error: McpError): string {
     .trim();
 }
 
-const RATE_LIMITED = `${FETCH_CONNECTOR} has run out of free requests for now. Its free tier allows a limited number of searches and fetches; try again later, or add your own Parallel API key to the connector to lift the limit.`;
+const RATE_LIMITED = `${FETCH_CONNECTOR} is busy or over its free usage limit right now. It's a free, shared service, so try again in a little while.`;
 
 export function connectorMessage(error: McpError): string {
   const detail = connectorDetail(error);
@@ -469,7 +504,7 @@ export function connectorMessage(error: McpError): string {
     default:
       // The platform reports connector-side failures (including the free-tier limit) as a generic
       // "Connector call failed", so say what usually causes it.
-      return `${FETCH_CONNECTOR} couldn't complete the request${detail ? ` (${detail.slice(0, 160)})` : ""}. This is usually its free request limit: try again later, or add your own Parallel API key to the connector. [${error.code || "error"}]`;
+      return `${FETCH_CONNECTOR} didn't answer this time${detail ? ` (${detail.slice(0, 160)})` : ""}. It's a free, shared service that limits how often it can be used, so try again in a little while. [${error.code || "error"}]`;
   }
 }
 
@@ -519,21 +554,58 @@ export async function fetchUrls(mcp: McpNs, urls: string[], objective: string): 
   return out;
 }
 
-async function call(mcp: McpNs, input: unknown): Promise<FetchPayload> {
-  const result = await mcp.callTool(FETCH_CONNECTOR, FETCH_TOOL, input, { cache: false });
-  const payload = result.payload;
-  if (payload && typeof payload === "object") return payload as FetchPayload;
-  if (typeof payload === "string") {
-    try {
-      return JSON.parse(payload) as FetchPayload;
-    } catch {
-      // fall through
-    }
-  }
-  return {};
+/** The stable id the connector asks every call to carry (its free tier counts usage per session). */
+function connectorSessionId(): string {
+  if (rootDoc?.fetch_session_id) return rootDoc.fetch_session_id;
+  const id = `comper-${crypto.randomUUID().replace(/-/g, "")}`;
+  updateRoot(() => ({ fetch_session_id: id }), "Couldn't save Comper's connector id").catch(quiet);
+  return id;
 }
 
-type RobotsVerdict = { allowed: true } | { allowed: false; reason: string };
+/** Record each connector call (outcome, timing, error code) so problems can be diagnosed later. */
+function record(entry: LogEntry) {
+  log = [...log, entry].slice(-40);
+  const snapshot = log;
+  if (logRef) serial("log", () => logRef!.set({ entries: snapshot })).catch(quiet);
+}
+
+/** Call one of the connector's tools with the session id, logging the outcome. Rejects with the McpError. */
+export async function callConnector<T>(mcp: McpNs, tool: string, input: Record<string, unknown>): Promise<T> {
+  const started = Date.now();
+  const urls = Array.isArray(input.urls) ? input.urls.length : 0;
+  try {
+    const result = await mcp.callTool(FETCH_CONNECTOR, tool, { ...input, session_id: connectorSessionId() }, { cache: false });
+    let payload = result.payload;
+    if (typeof payload === "string") {
+      try {
+        payload = JSON.parse(payload);
+      } catch {
+        // leave as text
+      }
+    }
+    const p = (payload && typeof payload === "object" ? payload : {}) as { results?: unknown[]; errors?: unknown[] };
+    record({ at: now(), tool, urls, ok: true, ms: Date.now() - started, results: p.results?.length ?? 0, errors: p.errors?.length ?? 0 });
+    return p as T;
+  } catch (error) {
+    const e = error as McpError;
+    record({
+      at: now(),
+      tool,
+      urls,
+      ok: false,
+      ms: Date.now() - started,
+      code: e.code,
+      message: `${e.message ?? ""} ${connectorDetail(e)}`.trim().slice(0, 300),
+    });
+    throw error;
+  }
+}
+
+function call(mcp: McpNs, input: Record<string, unknown>): Promise<FetchPayload> {
+  return callConnector<FetchPayload>(mcp, FETCH_TOOL, input);
+}
+
+export type RobotsVerdict = { allowed: true } | { allowed: false; reason: string };
 
 /** robots.txt rules, RFC 9309 style: missing (4xx) = allowed; unreachable = skip for now. */
 export function robotsVerdict(feedUrl: string, robots: FetchResult | undefined): RobotsVerdict {
@@ -610,6 +682,11 @@ export interface CheckSummary {
 
 let checking: Promise<CheckSummary> | null = null;
 
+/** Remember a failed check so the automatic check on opening backs off for a while. */
+function noteCheckFailure() {
+  return updateRoot(() => ({ last_check_error_at: now() }), "Couldn't save the check status").catch(quiet);
+}
+
 /**
  * Check enabled feeds (or just `feedIds`): read each site's robots.txt, then
  * fetch the feeds it allows, then store competitions we haven't seen.
@@ -620,19 +697,40 @@ export function checkFeeds(feedIds?: string[]): Promise<CheckSummary> {
   const run = (async (): Promise<CheckSummary> => {
     feedResource.setState({ loading: true });
     try {
-      const feeds = (rootDoc?.feeds ?? []).filter((f) => f.enabled && (!feedIds || feedIds.includes(f.id)));
+      const feeds: StoredFeed[] = (rootDoc?.feeds ?? []).filter((f) => f.enabled && (!feedIds || feedIds.includes(f.id)));
       if (!feeds.length) return { newItems: 0, checked: 0, problems: [] };
       const mcp = await capability("mcp");
       if (!mcp) throw new ConnectorProblem("not_granted", "Connectors aren't available in this view of Comper. Open it in Claude.");
 
-      const robotsUrls = [...new Set(feeds.map((f) => new URL("/robots.txt", f.url).toString()))];
-      const robots = await fetchUrls(mcp, robotsUrls, "The robots.txt rules for crawlers");
-      const verdicts = new Map(feeds.map((f) => [f.id, robotsVerdict(f.url, robots.get(urlKey(new URL("/robots.txt", f.url).toString())))]));
+      // robots.txt is re-read at most once a day per feed (RFC 9309 allows caching for 24 hours).
+      const dayAgo = Date.now() - 86_400_000;
+      const recentlyAllowed = (f: StoredFeed) => !!f.robots_ok_at && new Date(f.robots_ok_at).getTime() > dayAgo;
+      const robotsUrls = [...new Set(feeds.filter((f) => !recentlyAllowed(f)).map((f) => new URL("/robots.txt", f.url).toString()))];
+      let robots = new Map<string, FetchResult>();
+      try {
+        if (robotsUrls.length) robots = await fetchUrls(mcp, robotsUrls, "The robots.txt rules for crawlers");
+      } catch (error) {
+        await noteCheckFailure();
+        throw error;
+      }
+      const verdicts = new Map<string, RobotsVerdict>(
+        feeds.map((f) => [
+          f.id,
+          recentlyAllowed(f) ? { allowed: true } : robotsVerdict(f.url, robots.get(urlKey(new URL("/robots.txt", f.url).toString()))),
+        ]),
+      );
       const allowed = feeds.filter((f) => verdicts.get(f.id)?.allowed);
-      const fetched = allowed.length ? await fetchUrls(mcp, allowed.map((f) => f.url), FEED_OBJECTIVE) : new Map<string, FetchResult>();
+      let fetched = new Map<string, FetchResult>();
+      try {
+        if (allowed.length) fetched = await fetchUrls(mcp, allowed.map((f) => f.url), FEED_OBJECTIVE);
+      } catch (error) {
+        await noteCheckFailure();
+        throw error;
+      }
 
       const at = now();
-      const results = new Map<string, Partial<Feed>>();
+      const robotsOkAt = (f: StoredFeed) => (recentlyAllowed(f) ? f.robots_ok_at : at);
+      const results = new Map<string, Partial<StoredFeed>>();
       const fresh: (CompetitionDraft & { id: string })[] = [];
       const problems: CheckSummary["problems"] = [];
       const pages: { feed: Feed; content: string }[] = [];
@@ -666,7 +764,7 @@ export function checkFeeds(feedIds?: string[]): Promise<CheckSummary> {
         }
         try {
           const added = ingest(feed, parseFetchedFeed(res.content));
-          results.set(feed.id, { last_status: "ok", last_error: null, last_new_items: added, last_fetched_at: at });
+          results.set(feed.id, { last_status: "ok", last_error: null, last_new_items: added, last_fetched_at: at, robots_ok_at: robotsOkAt(feed) });
         } catch (error) {
           if (error instanceof NotAFeedError) pages.push({ feed, content: res.content });
           else fail(feed, error instanceof Error ? error.message : String(error));
@@ -675,14 +773,21 @@ export function checkFeeds(feedIds?: string[]): Promise<CheckSummary> {
 
       // Addresses that turned out to be ordinary pages: look for the site's feed and remember it.
       for (const { feed, content } of pages.slice(0, 3)) {
-        const robotsResult = robots.get(urlKey(new URL("/robots.txt", feed.url).toString()));
-        const found = await findFeedOnSite(mcp, feed.url, content, robotsResult).catch((error) => {
-          if (error instanceof ConnectorProblem) throw error;
+        const robotsUrl = new URL("/robots.txt", feed.url).toString();
+        let robotsResult = robots.get(urlKey(robotsUrl));
+        const found = await (async () => {
+          robotsResult ??= (await fetchUrls(mcp, [robotsUrl], "The robots.txt rules for crawlers")).get(urlKey(robotsUrl));
+          return findFeedOnSite(mcp, feed.url, content, robotsResult);
+        })().catch(async (error) => {
+          if (error instanceof ConnectorProblem) {
+            await noteCheckFailure();
+            throw error;
+          }
           return null;
         });
         if (found) {
           const added = ingest(feed, found.parsed);
-          results.set(feed.id, { url: found.url, last_status: "ok", last_error: null, last_new_items: added, last_fetched_at: at });
+          results.set(feed.id, { url: found.url, last_status: "ok", last_error: null, last_new_items: added, last_fetched_at: at, robots_ok_at: at });
         } else {
           fail(feed, `No RSS feed found on ${new URL(feed.url).hostname}. Look for an RSS link on the site and paste that address instead.`);
         }
@@ -707,6 +812,7 @@ export function checkFeeds(feedIds?: string[]): Promise<CheckSummary> {
       await updateRoot(
         (r) => ({
           last_refresh_at: at,
+          last_check_error_at: null,
           feeds: r.feeds.map((f) => (results.has(f.id) ? { ...f, ...results.get(f.id) } : f)),
         }),
         "Couldn't save the feed status",
