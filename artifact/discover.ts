@@ -152,13 +152,14 @@ export const DIRECTORY_SITES = [
 /**
  * UK competition feeds checked by hand (7 Oct 2026): robots.txt allows
  * them and their items are free prize draws. Always read alongside what
- * the directory finds, since Feedly lists only some of them. Addresses are
- * as Feedly knows them.
+ * the directory finds, since Feedly lists only some of them. Each address
+ * is the form that read cleanly: Feedly knows ThePrizeFinder's first two
+ * by their http:// address; the other two read through rss2json.
  */
 export const KNOWN_FEEDS: DirectoryHit[] = [
   ["http://www.theprizefinder.com/feed/new-competitions", "ThePrizeFinder: New competitions"],
   ["http://www.theprizefinder.com/feed/top-prizes", "ThePrizeFinder: Top prizes"],
-  ["http://www.theprizefinder.com/feed/closing-soon", "ThePrizeFinder: Closing soon"],
+  ["https://www.theprizefinder.com/feed/closing-soon", "ThePrizeFinder: Closing soon"],
   ["https://www.latestfreestuff.co.uk/free-competitions/feed/", "Latest Free Stuff: Free competitions"],
 ].map(([feedUrl, title]) => ({
   feedUrl,
