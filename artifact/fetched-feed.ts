@@ -148,4 +148,4 @@ export function feedLinksInPage(content: string, pageUrl: string): { feeds: stri
 export const COMMON_FEED_PATHS = ["/feed/", "/rss", "/rss.xml", "/feed.xml", "/atom.xml"];
 
 /** Pages that often list a site's feeds. */
-export const COMMON_FEED_PAGES = ["/feeds", "/rss-feeds"];
+export const COMMON_FEED_PAGES = ["/feeds"];

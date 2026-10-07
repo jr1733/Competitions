@@ -1,7 +1,8 @@
 import { itemToCompetition, type CompetitionDraft } from "@/lib/feed/normalise";
 import { capability, type McpError, type McpNs } from "./claude";
 import { callConnector, ConnectorProblem, connectorMessage, fetchUrls, robotsVerdict, urlKey } from "./data";
-import { looksLikeCompetitions, parseFetchedFeed } from "./fetched-feed";
+import { COMMON_FEED_PAGES, COMMON_FEED_PATHS, feedLinksInPage, looksLikeCompetitions, parseFetchedFeed } from "./fetched-feed";
+import type { ParsedFeed } from "@/lib/feed/parse";
 
 export { looksLikeCompetitions };
 
@@ -36,8 +37,6 @@ const SKIP_HOSTS =
 
 const FEED_URL = /https?:\/\/[^\s<>"'()[\]|]+?(?:\/feed\/?|\/rss(?:\.xml)?\/?|\/atom(?:\.xml)?|\/feed\.xml|\.rss)(?=[\s<>"'()[\]|,]|$)/gi;
 
-/** Paths most sites use for their main feed (WordPress first: most comping blogs run on it). */
-const COMMON_FEED_PATHS = ["/feed/", "/rss"];
 
 function isFeedUrl(url: string): boolean {
   FEED_URL.lastIndex = 0;
@@ -78,7 +77,7 @@ export function feedUrlsToTry(origins: string[], direct: string[], limit = 20): 
     if (urls.length < limit && !urls.some((x) => urlKey(x) === urlKey(u))) urls.push(u);
   };
   direct.forEach(add);
-  for (const path of COMMON_FEED_PATHS) for (const origin of origins) add(origin + path);
+  for (const path of COMMON_FEED_PATHS.slice(0, 2)) for (const origin of origins) add(origin + path);
   return urls;
 }
 
@@ -98,6 +97,23 @@ async function searchWeb(mcp: McpNs): Promise<SearchHit[]> {
 
 const originOf = (url: string) => new URL(url).origin;
 
+/**
+ * Well-known UK comping sites, tried alongside whatever the search finds.
+ * These are only starting points: each is still checked for robots.txt and
+ * must actually serve a competition feed before it's shown.
+ */
+export const KNOWN_SITES = [
+  "https://www.theprizefinder.com",
+  "https://www.loquax.co.uk",
+  "https://www.competitiondatabase.co.uk",
+  "https://www.superlucky.me",
+  "https://www.competitions-time.co.uk",
+  "https://felixcompetitions.uk",
+  "https://winninguk.co.uk",
+];
+
+const FEED_OBJECTIVE = "Every item in this RSS feed: title, link, published date and description";
+
 export async function discoverFeeds(existingUrls: string[], onProgress: (message: string) => void): Promise<FeedCandidate[]> {
   const mcp = await capability("mcp");
   if (!mcp) throw new ConnectorProblem("not_granted", "Connectors aren't available in this view of Comper. Open it in Claude.");
@@ -105,29 +121,53 @@ export async function discoverFeeds(existingUrls: string[], onProgress: (message
 
   onProgress("Searching the web for UK competition sites…");
   const { origins, direct } = candidatesFromSearch(await searchWeb(mcp));
-  if (!origins.length && !direct.length) return [];
+  const sites = [...new Set([...KNOWN_SITES, ...origins, ...direct.map(originOf)])].slice(0, 12);
 
-  const sites = [...new Set([...origins, ...direct.map(originOf)])].slice(0, 20);
-  onProgress(`Checking robots.txt on ${sites.length} site${sites.length === 1 ? "" : "s"}…`);
+  onProgress(`Checking robots.txt on ${sites.length} sites…`);
   const robots = await fetchUrls(mcp, sites.map((o) => `${o}/robots.txt`), "The robots.txt rules for crawlers");
+  const allowed = (u: string) => !existing.has(urlKey(u)) && robotsVerdict(u, robots.get(urlKey(`${originOf(u)}/robots.txt`))).allowed;
 
-  const toTry = feedUrlsToTry(origins, direct).filter(
-    (u) => !existing.has(urlKey(u)) && robotsVerdict(u, robots.get(urlKey(`${originOf(u)}/robots.txt`))).allowed,
-  );
-  if (!toTry.length) return [];
-  onProgress(`Looking for feeds on ${new Set(toTry.map(originOf)).size} sites…`);
-  const fetched = await fetchUrls(mcp, toTry, "Every item in this RSS feed: title, link, published date and description");
+  const tried = new Set<string>();
+  const feeds: { url: string; parsed: ParsedFeed }[] = [];
+  const pages = new Map<string, string>();
+  const probe = async (urls: string[]) => {
+    const batch = urls.filter((u) => !tried.has(urlKey(u)) && allowed(u));
+    batch.forEach((u) => tried.add(urlKey(u)));
+    if (!batch.length) return;
+    const fetched = await fetchUrls(mcp, batch, FEED_OBJECTIVE, { detail: true });
+    for (const u of batch) {
+      const content = fetched.get(urlKey(u))?.content;
+      if (!content) continue;
+      try {
+        const parsed = parseFetchedFeed(content);
+        if (parsed.items.length) feeds.push({ url: u, parsed });
+      } catch {
+        pages.set(u, content);
+      }
+    }
+  };
+  const sitesWithFeeds = () => new Set(feeds.map((f) => originOf(f.url)));
+
+  // 1. Feed addresses mentioned in the results, and each site's "RSS feeds" pages.
+  onProgress("Looking for each site's RSS feeds page…");
+  await probe([...direct, ...sites.flatMap((o) => COMMON_FEED_PAGES.map((p) => o + p))]);
+
+  // 2. The feeds those pages list.
+  const listed = [...pages].flatMap(([url, content]) => feedLinksInPage(content, url).feeds);
+  if (listed.length) {
+    onProgress(`Reading ${listed.length} feed${listed.length === 1 ? "" : "s"} listed on those pages…`);
+    await probe(listed);
+  }
+
+  // 3. The usual feed addresses, on sites that still have none.
+  const remaining = sites.filter((o) => !sitesWithFeeds().has(o));
+  if (remaining.length) {
+    onProgress(`Trying the usual feed addresses on ${remaining.length} sites…`);
+    await probe(remaining.flatMap((o) => COMMON_FEED_PATHS.slice(0, 2).map((p) => o + p)));
+  }
 
   const found: (FeedCandidate & { signature: string })[] = [];
-  for (const url of toTry) {
-    const res = fetched.get(urlKey(url));
-    if (!res?.content) continue;
-    let parsed;
-    try {
-      parsed = parseFetchedFeed(res.content);
-    } catch {
-      continue; // not a feed
-    }
+  for (const { url, parsed } of feeds) {
     if (!looksLikeCompetitions(parsed.items.map((i) => i.title))) continue;
     const site = new URL(url).hostname.replace(/^www\./, "");
     const drafts = parsed.items

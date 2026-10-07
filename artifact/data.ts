@@ -60,6 +60,8 @@ interface LogEntry {
   message?: string;
   results?: number;
   errors?: number;
+  /** Per-address outcome for feed searches: address, status, size, first characters. */
+  detail?: { u: string; s: string; n?: number; h?: string }[];
 }
 
 // ---------------------------------------------------------------------------
@@ -525,31 +527,90 @@ export function urlKey(url: string): string {
 }
 
 /** Fetch up to 20 URLs per call; at most one retry, and only for errors the connector marks retryable. */
-export async function fetchUrls(mcp: McpNs, urls: string[], objective: string): Promise<Map<string, FetchResult>> {
+const LIFECYCLE_CODES = new Set(["not_granted", "capability_disabled", "capability_removed", "not_in_manifest", "server_not_connected", "server_not_found", "needs_reauth", "selection_required", "blocked_by_policy", "approval_required"]);
+
+function isRateLimit(e: McpError): boolean {
+  return /rate.?limit|too many requests|\b429\b/i.test(`${e.message ?? ""} ${connectorDetail(e)}`);
+}
+
+/**
+ * Fetch up to 20 URLs per call. A call is retried once only when the
+ * connector marks the error retryable. If a call with several URLs fails
+ * outright (one bad address can sink a whole batch), it's split in two and
+ * each half tried once; only when nothing gets through is it reported.
+ */
+export async function fetchUrls(
+  mcp: McpNs,
+  urls: string[],
+  objective: string,
+  options: { detail?: boolean } = {},
+): Promise<Map<string, FetchResult>> {
   const out = new Map<string, FetchResult>();
-  for (let i = 0; i < urls.length; i += 20) {
-    const batch = urls.slice(i, i + 20);
-    const input = { urls: batch, full_content: true, objective, allow_live_fetch: true };
-    let payload: FetchPayload;
-    try {
-      payload = await call(mcp, input);
-    } catch (error) {
-      const e = error as McpError;
-      if (!e.retryable) throw new ConnectorProblem(e.code, connectorMessage(e));
-      await new Promise((r) => setTimeout(r, Math.min(e.retryAfterMs ?? 2000, 10_000) + Math.random() * 1000));
-      try {
-        payload = await call(mcp, input);
-      } catch (again) {
-        const e2 = again as McpError;
-        throw new ConnectorProblem(e2.code, connectorMessage(e2));
-      }
-    }
+
+  const absorb = (payload: FetchPayload) => {
     for (const r of payload.results ?? []) {
       out.set(urlKey(r.url), { url: r.url, content: r.full_content ?? (r.excerpts ?? []).join("\n\n") });
     }
     for (const e of payload.errors ?? []) {
       out.set(urlKey(e.url), { url: e.url, status: e.http_status_code ?? undefined, error: e.error_type ?? "fetch error" });
     }
+  };
+
+  const once = async (batch: string[]) => {
+    const input = { urls: batch, full_content: true, objective, allow_live_fetch: true };
+    try {
+      return await call(mcp, input);
+    } catch (error) {
+      const e = error as McpError;
+      if (!e.retryable) throw e;
+      await new Promise((r) => setTimeout(r, Math.min(e.retryAfterMs ?? 2000, 10_000) + Math.random() * 1000));
+      return await call(mcp, input);
+    }
+  };
+
+  // On failure, split and retry each half, at most two levels deep: one bad address then costs a
+  // few extra calls and loses at most a quarter of the batch, not the whole of it.
+  let lastError: McpError | null = null;
+  let anyOk = false;
+  const attempt = async (batch: string[], depth: number): Promise<void> => {
+    try {
+      absorb(await once(batch));
+      anyOk = true;
+    } catch (error) {
+      const e = error as McpError;
+      lastError = e;
+      if (isRateLimit(e) || LIFECYCLE_CODES.has(e.code)) throw new ConnectorProblem(e.code, connectorMessage(e));
+      if (batch.length < 2 || depth >= 2) {
+        for (const u of batch) out.set(urlKey(u), { url: u, error: `connector failed (${e.code})` });
+        return;
+      }
+      const half = Math.ceil(batch.length / 2);
+      await attempt(batch.slice(0, half), depth + 1);
+      await attempt(batch.slice(half), depth + 1);
+    }
+  };
+
+  for (let i = 0; i < urls.length; i += 20) await attempt(urls.slice(i, i + 20), 0);
+  if (!anyOk && lastError) {
+    const e: McpError = lastError;
+    throw new ConnectorProblem(e.code, connectorMessage(e));
+  }
+
+  if (options.detail) {
+    record({
+      at: now(),
+      tool: "detail",
+      urls: urls.length,
+      ok: true,
+      ms: 0,
+      detail: urls.map((u) => {
+        const r = out.get(urlKey(u));
+        const short = u.replace(/^https?:\/\//, "").slice(0, 90);
+        if (!r) return { u: short, s: "no answer" };
+        if (r.content === undefined) return { u: short, s: r.status ? `HTTP ${r.status}` : (r.error ?? "error") };
+        return { u: short, s: "ok", n: r.content.length, h: r.content.replace(/\s+/g, " ").slice(0, 100) };
+      }),
+    });
   }
   return out;
 }
@@ -564,8 +625,11 @@ function connectorSessionId(): string {
 
 /** Record each connector call (outcome, timing, error code) so problems can be diagnosed later. */
 function record(entry: LogEntry) {
-  log = [...log, entry].slice(-40);
-  const snapshot = log;
+  // Keep the log document small: 40 entries, per-address detail only on the latest few.
+  const kept = [...log, entry].slice(-40);
+  const detailed = kept.map((e, i) => i).filter((i) => kept[i].detail).slice(-6);
+  log = kept.map((e, i) => (e.detail && !detailed.includes(i) ? { ...e, detail: undefined } : e));
+  const snapshot = JSON.parse(JSON.stringify(log)) as LogEntry[];
   if (logRef) serial("log", () => logRef!.set({ entries: snapshot })).catch(quiet);
 }
 
@@ -643,7 +707,7 @@ export async function findFeedOnSite(
     const batch = urls.filter((u) => !tried.has(urlKey(u)) && allowed(u)).slice(0, 20);
     batch.forEach((u) => tried.add(urlKey(u)));
     if (!batch.length) return new Map();
-    const fetched = await fetchUrls(mcp, batch, FEED_OBJECTIVE);
+    const fetched = await fetchUrls(mcp, batch, FEED_OBJECTIVE, { detail: true });
     for (const u of batch) {
       const content = fetched.get(urlKey(u))?.content;
       if (!content) continue;
@@ -657,17 +721,18 @@ export async function findFeedOnSite(
     return fetched;
   }
 
+  // 1. Feed links on the page, and pages about feeds ("RSS Feeds" links, /feeds).
   const links = feedLinksInPage(pageContent, pageUrl);
-  for (const p of COMMON_FEED_PAGES) if (!links.feedPages.includes(origin + p)) links.feedPages.push(origin + p);
-  const first = await tryBatch([...links.feeds, ...COMMON_FEED_PATHS.map((p) => origin + p), ...links.feedPages]);
-  if (!found.length) {
-    // Follow "RSS feeds" pages one level: they usually list the feed addresses.
-    const more = links.feedPages.flatMap((p) => {
-      const content = first.get(urlKey(p))?.content;
-      return content ? feedLinksInPage(content, p).feeds : [];
-    });
-    if (more.length) await tryBatch(more);
-  }
+  const feedPages = [...new Set([...links.feedPages, ...COMMON_FEED_PAGES.map((p) => origin + p)])];
+  const first = await tryBatch([...links.feeds, ...feedPages]);
+  // 2. The feeds those pages list.
+  const listed = feedPages.flatMap((p) => {
+    const content = first.get(urlKey(p))?.content;
+    return content ? feedLinksInPage(content, p).feeds : [];
+  });
+  if (listed.length) await tryBatch(listed);
+  // 3. Last resort: the usual feed addresses.
+  if (!found.length) await tryBatch(COMMON_FEED_PATHS.map((p) => origin + p));
   if (!found.length) return null;
   const score = (f: { parsed: ParsedFeed }) =>
     (looksLikeCompetitions(f.parsed.items.map((i) => i.title)) ? 10_000 : 0) + f.parsed.items.length;
