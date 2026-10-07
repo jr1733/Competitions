@@ -82,10 +82,9 @@ Thousands of UK competitions.
 [Latest](https://www.prizes.example.com/latest) · [RSS Feeds](/feeds) · [Facebook](https://facebook.com/prizes)
 Subscribe: https://www.prizes.example.com/rss/new-competitions.xml
 [Other site feed](https://elsewhere.example.org/feed/)`;
-    expect(feedLinksInPage(page, "https://www.prizes.example.com/")).toEqual({
-      feeds: ["https://www.prizes.example.com/rss/new-competitions.xml"],
-      feedPages: ["https://www.prizes.example.com/feeds"],
-    });
+    const links = feedLinksInPage(page, "https://www.prizes.example.com/");
+    expect(links.feeds).toEqual(["https://www.prizes.example.com/rss/new-competitions.xml", "https://elsewhere.example.org/feed/"]);
+    expect(links.feedPages).toEqual(["https://www.prizes.example.com/feeds"]);
   });
 
   it("recognises common feed addresses", () => {
@@ -103,5 +102,31 @@ describe("feedLinksInPage with icon links", async () => {
   it("finds feed links wrapped round icons, relative or absolute", () => {
     const page = "* New Competitions [![RSS](/img/rss.png)](/rss/new.xml) [![Feedly](/img/feedly.png)](https://feedly.com/i/subscription/feed/x)";
     expect(feedLinksInPage(page, "https://www.prizes.example.com/feeds").feeds).toEqual(["https://www.prizes.example.com/rss/new.xml"]);
+  });
+});
+
+describe("feedLinksInPage across hosts", async () => {
+  const { feedLinksInPage, isFeedishUrl } = await import("../artifact/fetched-feed");
+  it("accepts FeedBurner and feeds. subdomains", () => {
+    expect(isFeedishUrl("https://feeds.feedburner.com/ThePrizeFinder-NewCompetitions")).toBe(true);
+    expect(isFeedishUrl("https://feeds.example.com/new-comps")).toBe(true);
+    const page = "* New Competitions [![](/i/rss.png)](https://feeds.feedburner.com/PrizeSite-New)";
+    expect(feedLinksInPage(page, "https://www.prizes.example.com/feeds").feeds).toEqual(["https://feeds.feedburner.com/PrizeSite-New"]);
+  });
+  it("pulls the feed address out of 'Add to Yahoo / Feedly' links", () => {
+    const page =
+      "[![](/i/yahoo.png)](https://add.my.yahoo.com/rss?url=https%3A%2F%2Fwww.prizes.example.com%2Fcomps%2Fnew.php) " +
+      "[![](/i/feedly.png)](https://feedly.com/i/subscription/feed%2Fhttps%3A%2F%2Fwww.prizes.example.com%2Frss%2Ftop.xml)";
+    const links = feedLinksInPage(page, "https://www.prizes.example.com/feeds");
+    expect(links.feeds).toContain("https://www.prizes.example.com/rss/top.xml");
+    expect(links.hints.length).toBeGreaterThan(0);
+  });
+});
+
+describe("subscribe services", async () => {
+  const { feedLinksInPage } = await import("../artifact/fetched-feed");
+  it("never treats the subscribe service itself as a feed", () => {
+    const page = "[![](/i/yahoo.png)](https://add.my.yahoo.com/rss?url=https%3A%2F%2Ffeeds.feedburner.com%2FX)";
+    expect(feedLinksInPage(page, "https://www.prizes.example.com/feeds").feeds).toEqual(["https://feeds.feedburner.com/X"]);
   });
 });

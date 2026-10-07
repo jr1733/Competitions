@@ -94,14 +94,34 @@ const FEEDISH_PATH = /\/feed\/?$|\/rss(?:\/|\.xml|$)|\.(?:xml|rss|atom)$|\/atom(
 const FEEDISH_QUERY = /[?&](?:feed|format|type)=(?:rss|atom)/i;
 const FEED_WORDS = /\b(rss|feeds?|atom)\b/i;
 
+/** Hosts that only serve feeds (FeedBurner and friends). */
+const FEED_HOSTS = /(^|\.)(feedburner\.com|feedproxy\.google\.com)$|^feeds?\./i;
+
 /** Does this address look like a feed rather than a page? */
 export function isFeedishUrl(url: string): boolean {
   try {
     const u = new URL(url);
-    return FEEDISH_PATH.test(u.pathname) || FEEDISH_QUERY.test(u.search);
+    return FEEDISH_PATH.test(u.pathname) || FEEDISH_QUERY.test(u.search) || (FEED_HOSTS.test(u.hostname) && u.pathname.length > 1);
   } catch {
     return false;
   }
+}
+
+/** Feed-reader "subscribe" services: never fetched themselves. */
+const SUBSCRIBE_SERVICES = /(^|\.)(add\.my\.yahoo\.com|my\.yahoo\.com|feedly\.com|fusion\.google\.com|google\.com|bloglines\.com|netvibes\.com|newsgator\.com|inoreader\.com|theoldreader\.com)$/i;
+
+/** "Add to Yahoo/Google/Feedly" style links carry the feed's own address in the query string. */
+function embeddedUrls(url: URL): string[] {
+  const out: string[] = [];
+  for (const [key, value] of url.searchParams) {
+    if (!/^(url|feed|feedurl|rss|uri|u|subscribe)$/i.test(key)) continue;
+    let v = value;
+    if (/^feed\//i.test(v)) v = v.slice(5); // Feedly: feed/https://…
+    if (/^https?:\/\//i.test(v)) out.push(v);
+  }
+  const feedly = /\/subscription\/feed\/(https?:\/\/.+)$/i.exec(decodeURIComponent(url.pathname));
+  if (feedly) out.push(feedly[1]);
+  return out;
 }
 
 function sameSite(a: string, b: string): boolean {
@@ -116,24 +136,33 @@ function sameSite(a: string, b: string): boolean {
  * feeds: `feeds` look like feed addresses; `feedPages` are pages about feeds
  * (e.g. "RSS Feeds" in a footer) that may list them.
  */
-export function feedLinksInPage(content: string, pageUrl: string): { feeds: string[]; feedPages: string[] } {
+export function feedLinksInPage(content: string, pageUrl: string): { feeds: string[]; feedPages: string[]; hints: string[] } {
   const page = new URL(pageUrl);
   const feeds: string[] = [];
   const feedPages: string[] = [];
-  const consider = (raw: string, text: string) => {
+  const hints: string[] = [];
+  const consider = (raw: string, text: string, depth = 0) => {
     let url: URL;
     try {
       url = new URL(raw.replace(/[.,;]+$/, ""), page);
     } catch {
       return;
     }
-    if ((url.protocol !== "https:" && url.protocol !== "http:") || !sameSite(url.hostname, page.hostname)) return;
+    if (url.protocol !== "https:" && url.protocol !== "http:") return;
     url.hash = "";
     const href = url.toString();
     if (href === page.toString()) return;
+    if ((FEED_WORDS.test(text) || /rss|feed|xml|atom|subscribe/i.test(href)) && !hints.includes(href)) hints.push(href);
+    if (depth === 0) for (const inner of embeddedUrls(url)) consider(inner, text, 1);
+    if (SUBSCRIBE_SERVICES.test(url.hostname)) return; // "Add to Yahoo/Feedly…": only the feed inside matters
     if (isFeedishUrl(href)) {
+      // Feed links may point at another host (FeedBurner, a feeds. subdomain): that's fine for feeds.
       if (!feeds.includes(href)) feeds.push(href);
-    } else if ((FEED_WORDS.test(text) || FEED_WORDS.test(url.pathname)) && !feedPages.includes(href)) {
+    } else if (
+      sameSite(url.hostname, page.hostname) &&
+      (FEED_WORDS.test(text) || FEED_WORDS.test(url.pathname)) &&
+      !feedPages.includes(href)
+    ) {
       feedPages.push(href);
     }
   };
@@ -141,7 +170,10 @@ export function feedLinksInPage(content: string, pageUrl: string): { feeds: stri
   // Links wrapped round an icon, e.g. [![RSS](icon.png)](/rss/new.xml): take every "](href)".
   for (const m of content.matchAll(/\]\(\s*<?([^)\s>]+)>?(?:\s+"[^"]*")?\s*\)/g)) consider(m[1], "");
   for (const m of content.matchAll(/https?:\/\/[^\s<>"'()[\]|]+/g)) consider(m[0], "");
-  return { feeds: feeds.slice(0, 10), feedPages: feedPages.slice(0, 3) };
+  // The site's own feeds first, then feeds hosted elsewhere (FeedBurner, partners).
+  const own = (u: string) => (sameSite(new URL(u).hostname, page.hostname) ? 0 : 1);
+  const ordered = [...feeds].sort((a, b) => own(a) - own(b));
+  return { feeds: ordered.slice(0, 10), feedPages: feedPages.slice(0, 3), hints: hints.slice(0, 8) };
 }
 
 /** Where most sites keep their main feed, tried when a page doesn't link one. */

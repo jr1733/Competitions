@@ -61,7 +61,7 @@ interface LogEntry {
   results?: number;
   errors?: number;
   /** Per-address outcome for feed searches: address, status, size, first characters. */
-  detail?: { u: string; s: string; n?: number; h?: string }[];
+  detail?: { u: string; s: string; n?: number; h?: string; l?: string[] }[];
 }
 
 // ---------------------------------------------------------------------------
@@ -515,6 +515,8 @@ export interface FetchResult {
   content?: string;
   status?: number;
   error?: string;
+  /** Text the connector sent with an error, if any. */
+  errorContent?: string;
 }
 
 interface FetchPayload {
@@ -552,12 +554,18 @@ export async function fetchUrls(
       out.set(urlKey(r.url), { url: r.url, content: r.full_content ?? (r.excerpts ?? []).join("\n\n") });
     }
     for (const e of payload.errors ?? []) {
-      out.set(urlKey(e.url), { url: e.url, status: e.http_status_code ?? undefined, error: e.error_type ?? "fetch error" });
+      if (out.get(urlKey(e.url))?.content !== undefined) continue; // a retry already got it
+      out.set(urlKey(e.url), {
+        url: e.url,
+        status: e.http_status_code ?? undefined,
+        error: e.error_type ?? "fetch error",
+        errorContent: typeof e.content === "string" ? e.content : undefined,
+      });
     }
   };
 
-  const once = async (batch: string[]) => {
-    const input = { urls: batch, full_content: true, objective, allow_live_fetch: true };
+  const once = async (batch: string[], fullContent = true) => {
+    const input = { urls: batch, full_content: fullContent, objective, allow_live_fetch: true };
     try {
       return await call(mcp, input);
     } catch (error) {
@@ -596,6 +604,20 @@ export async function fetchUrls(
     throw new ConnectorProblem(e.code, connectorMessage(e));
   }
 
+  // Feeds the site served (HTTP 2xx) but the connector couldn't turn into full content:
+  // ask once more in its shorter excerpts mode, which renders feeds the same way.
+  const unread = urls.filter((u) => {
+    const r = out.get(urlKey(u));
+    return r && r.content === undefined && r.status && r.status >= 200 && r.status < 300;
+  });
+  if (unread.length) {
+    try {
+      absorb(await once(unread.slice(0, 20), false));
+    } catch {
+      // keep the original errors
+    }
+  }
+
   if (options.detail) {
     record({
       at: now(),
@@ -607,8 +629,21 @@ export async function fetchUrls(
         const r = out.get(urlKey(u));
         const short = u.replace(/^https?:\/\//, "").slice(0, 90);
         if (!r) return { u: short, s: "no answer" };
-        if (r.content === undefined) return { u: short, s: r.status ? `HTTP ${r.status}` : (r.error ?? "error") };
-        return { u: short, s: "ok", n: r.content.length, h: r.content.replace(/\s+/g, " ").slice(0, 100) };
+        if (r.content === undefined) {
+          return {
+            u: short,
+            s: `${r.status ? `HTTP ${r.status} ` : ""}${r.error ?? "error"}`.trim(),
+            h: r.errorContent ? r.errorContent.replace(/\s+/g, " ").slice(0, 100) : undefined,
+          };
+        }
+        let l: string[] | undefined;
+        try {
+          parseFetchedFeed(r.content);
+        } catch {
+          const hints = feedLinksInPage(r.content, u).hints.map((x) => x.replace(/^https?:\/\//, "").slice(0, 100));
+          if (hints.length) l = hints;
+        }
+        return { u: short, s: "ok", n: r.content.length, h: r.content.replace(/\s+/g, " ").slice(0, 100), l };
       }),
     });
   }
@@ -699,11 +734,20 @@ export async function findFeedOnSite(
   robots: FetchResult | undefined,
 ): Promise<{ url: string; parsed: ParsedFeed } | null> {
   const origin = new URL(pageUrl).origin;
-  const allowed = (u: string) => robotsVerdict(u, robots).allowed;
+  // robots.txt per host: this site's is known; others (e.g. FeedBurner) are fetched before use.
+  const robotsByOrigin = new Map<string, FetchResult | undefined>([[origin, robots]]);
+  const allowed = (u: string) => robotsVerdict(u, robotsByOrigin.get(new URL(u).origin)).allowed;
   const tried = new Set<string>([urlKey(pageUrl)]);
   const found: { url: string; parsed: ParsedFeed }[] = [];
+  const learnRobots = async (urls: string[]) => {
+    const missing = [...new Set(urls.map((u) => new URL(u).origin))].filter((o) => !robotsByOrigin.has(o));
+    if (!missing.length) return;
+    const fetched = await fetchUrls(mcp, missing.map((o) => `${o}/robots.txt`), "The robots.txt rules for crawlers");
+    for (const o of missing) robotsByOrigin.set(o, fetched.get(urlKey(`${o}/robots.txt`)));
+  };
 
   async function tryBatch(urls: string[]): Promise<Map<string, FetchResult>> {
+    await learnRobots(urls.filter((u) => !tried.has(urlKey(u))));
     const batch = urls.filter((u) => !tried.has(urlKey(u)) && allowed(u)).slice(0, 20);
     batch.forEach((u) => tried.add(urlKey(u)));
     if (!batch.length) return new Map();

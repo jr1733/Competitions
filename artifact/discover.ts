@@ -143,6 +143,16 @@ export async function discoverFeeds(existingUrls: string[], onProgress: (message
   onProgress(`Checking robots.txt on ${sites.length} sites…`);
   const robots = await fetchUrls(mcp, sites.map((o) => `${o}/robots.txt`), "The robots.txt rules for crawlers");
   const allowed = (u: string) => !existing.has(urlKey(u)) && robotsVerdict(u, robots.get(urlKey(`${originOf(u)}/robots.txt`))).allowed;
+  // Feed links can point at other hosts (FeedBurner…): read their robots.txt before fetching.
+  const learnRobots = async (urls: string[]) => {
+    const missing = [...new Set(urls.map(originOf))].filter((o) => !robots.has(urlKey(`${o}/robots.txt`)));
+    if (!missing.length) return;
+    const more = await fetchUrls(mcp, missing.map((o) => `${o}/robots.txt`), "The robots.txt rules for crawlers");
+    for (const o of missing) {
+      const key = urlKey(`${o}/robots.txt`);
+      robots.set(key, more.get(key) ?? { url: `${o}/robots.txt`, error: "no answer" });
+    }
+  };
 
   const tried = new Set<string>();
   const feeds: { url: string; parsed: ParsedFeed }[] = [];
@@ -170,9 +180,10 @@ export async function discoverFeeds(existingUrls: string[], onProgress: (message
   await probe([...direct, ...sites.flatMap((o) => COMMON_FEED_PAGES.map((p) => o + p))]);
 
   // 2. The feeds those pages list.
-  const listed = [...pages].flatMap(([url, content]) => feedLinksInPage(content, url).feeds);
+  const listed = [...new Set([...pages].flatMap(([url, content]) => feedLinksInPage(content, url).feeds))].filter((u) => !tried.has(urlKey(u)));
   if (listed.length) {
     onProgress(`Reading ${listed.length} feed${listed.length === 1 ? "" : "s"} listed on those pages…`);
+    await learnRobots(listed);
     await probe(listed);
   }
 
