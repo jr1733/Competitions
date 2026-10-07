@@ -82,12 +82,43 @@ function unescapeMarkdown(text: string): string {
 // Finding a site's feed from one of its pages
 // ---------------------------------------------------------------------------
 
-const COMPETITION_WORDS = /\b(win|wins|won|competition|comp|giveaway|prize|prizes|draw|sweepstakes?|enter)\b/i;
+/** Free prize draws and giveaways: the kind of competition Comper is for. */
+const PRIZE_WORDS = /\bwin\b|\bgive-?aways?\b|\bprize draws?\b|\bfree draws?\b|\bsweepstakes?\b|\bup for grabs\b/i;
 
-/** A feed counts as a competition feed when at least 30% of its items read like competitions. */
+/**
+ * Competitions of another kind: judged on skill or with an entry fee
+ * (architecture, writing, hackathons…), or "competition" in another sense
+ * (competition law, workers' comp).
+ */
+const NOT_PRIZE_DRAWS =
+  /\barchitect(?:s|ure|ural)?\b|\burban design\b|\bdesign (?:competition|challenge|contest|award)s?\b|\bcall for (?:entries|submissions|proposals|papers|artists|projects)\b|\b(?:entry|registration|submission) fees?\b|\bhackathons?\b|\bantitrust\b|\bmergers?\b|\bcartels?\b|\bworkers'? comp\b|\bscholarships?\b|\bfellowships?\b|\bresidenc(?:y|ies)\b|\bmanuscripts?\b|\bscreenplays?\b|\bshort stor(?:y|ies)\b|\bpoetry\b|\bessay (?:competition|contest|prize)s?\b/i;
+
+/** Feed titles and descriptions that mean a feed is about something else, even if it says "competitions". */
+const OFF_TOPIC_FEED =
+  /\bdesign\b|\blaw\b|\blegal\b|\bmusic\b|\bgarage\b|\brhetoric\b|\bchess\b|\be-?sports?\b|\bphotograph(?:y|ers?)\b|\bwriting\b|\bwriters?\b|\bstart-?ups?\b|\bprogramming\b|\bcoding\b/i;
+
+const plain = (html: string) => html.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").slice(0, 400);
+
+/**
+ * A feed counts as prize draws when at least 40% of its item titles offer
+ * something to win or give away, and under 20% of its items read like
+ * skill or paid competitions.
+ */
+export function looksLikePrizeDraws(items: { title: string; html?: string }[]): boolean {
+  if (!items.length) return false;
+  const prizes = items.filter((i) => PRIZE_WORDS.test(i.title)).length;
+  const others = items.filter((i) => NOT_PRIZE_DRAWS.test(`${i.title} ${plain(i.html ?? "")}`)).length;
+  return prizes / items.length >= 0.4 && others / items.length < 0.2;
+}
+
+/** The same test from titles alone. */
 export function looksLikeCompetitions(titles: string[]): boolean {
-  if (!titles.length) return false;
-  return titles.filter((t) => COMPETITION_WORDS.test(t)).length / titles.length >= 0.3;
+  return looksLikePrizeDraws(titles.map((title) => ({ title })));
+}
+
+/** Is a feed's title or description about some other kind of competition? */
+export function isOffTopicFeed(text: string): boolean {
+  return NOT_PRIZE_DRAWS.test(text) || OFF_TOPIC_FEED.test(text);
 }
 
 // /feed/, /rss, .xml… and named feeds such as /feed/new-competitions or /rss/top-prizes.

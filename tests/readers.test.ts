@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { directorySearchUrls, pickDirectoryHits } from "../artifact/discover";
+import { directorySearchUrls, hitStrength, pickDirectoryHits } from "../artifact/discover";
+import { looksLikePrizeDraws } from "../artifact/fetched-feed";
 import { feedlySearchUrl, jsonIn, parseAnyFeed, parseDirectory, routeUrl, type DirectoryHit } from "../artifact/readers";
 import { NotAFeedError } from "@/lib/feed/parse";
 import { RSS_FEED } from "./fixtures";
@@ -170,7 +171,65 @@ describe("directorySearchUrls", () => {
   it("searches topics and each well-known site, in one batch", () => {
     const urls = directorySearchUrls();
     expect(urls.length).toBeLessThanOrEqual(20);
-    expect(urls).toContain(feedlySearchUrl("uk competitions", 10));
+    expect(urls).toContain(feedlySearchUrl("comping", 10));
     expect(urls).toContain(feedlySearchUrl("theprizefinder.com", 5));
+  });
+});
+
+// Feeds a real directory search turned up: only the comping one is wanted.
+const hit = (feedUrl: string, title: string, description = "", website: string | null = null): DirectoryHit => ({
+  feedUrl,
+  title,
+  website,
+  description,
+  subscribers: 10,
+  lastUpdated: null,
+  language: "en",
+});
+
+describe("hitStrength", () => {
+  it("rules out other kinds of competition from the directory entry", () => {
+    expect(hitStrength(hit("http://bustler.net/feed/competitions", "Bustler Competitions", "Architecture and design competitions worldwide"))).toBeNull();
+    expect(hitStrength(hit("http://www.law360.com/competition/rss", "Law360: Competition", "Antitrust and competition law news"))).toBeNull();
+    expect(hitStrength(hit("http://blog.reduceyourworkerscomp.com/feed", "Reduce Your Workers Comp"))).toBeNull();
+    expect(hitStrength(hit("http://paradiseofgaragecomps.blogspot.com/feeds/posts/default", "Paradise of Garage Comps", "Rare and obscure garage gems"))).toBeNull();
+  });
+
+  it("ranks known comping sites, then prize-draw words, then plain 'competitions'", () => {
+    expect(hitStrength(hit("http://www.theprizefinder.com/feed/new-competitions", "New Competitions"))).toBe("known");
+    expect(hitStrength(hit("https://mumblog.example.co.uk/feed/", "Mum Blog", "Family life, reviews and giveaways"))).toBe("strong");
+    expect(hitStrength(hit("http://bustler.net/feed/competitions", "Bustler Competitions"))).toBe("weak");
+  });
+});
+
+describe("looksLikePrizeDraws", () => {
+  it("accepts free prize draws", () => {
+    expect(
+      looksLikePrizeDraws([
+        { title: "WIN a £500 Argos gift card" },
+        { title: "Win a family holiday to Florida" },
+        { title: "Giveaway: Ninja air fryer" },
+        { title: "My comping wins this month" },
+      ]),
+    ).toBe(true);
+  });
+
+  it("rejects architecture, competition law and paid contests", () => {
+    expect(
+      looksLikePrizeDraws([
+        { title: "Call for Entries: Riverside Pavilion Competition" },
+        { title: "Winners announced for the 2026 Housing Ideas Competition" },
+        { title: "Competition: Museum of the Future", html: "<p>An open international architecture competition.</p>" },
+        { title: "Young Architects Prize 2026" },
+      ]),
+    ).toBe(false);
+    expect(looksLikePrizeDraws([{ title: "CMA clears supermarket merger" }, { title: "Competition watchdog fines cartel" }])).toBe(false);
+    expect(
+      looksLikePrizeDraws([
+        { title: "Win £1,000 in our landscape photo contest", html: "Entry fee £10 per image." },
+        { title: "Win a camera", html: "Entry fee £5." },
+        { title: "Win a Dyson" },
+      ]),
+    ).toBe(false);
   });
 });

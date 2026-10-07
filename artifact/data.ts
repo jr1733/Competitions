@@ -8,7 +8,7 @@ import { dedupeByUrl, itemToCompetition, type CompetitionDraft } from "@/lib/fee
 import { normaliseUrl } from "@/lib/feed/url";
 import type { Competition, EntryStatus, EntryWithCompetition, Feed, FeedStatus, Win } from "@/lib/types";
 import { capability, FETCH_CONNECTOR, FETCH_TOOL, type CollectionRef, type DocRef, type McpError, type McpNs } from "./claude";
-import { COMMON_FEED_PAGES, COMMON_FEED_PATHS, feedLinksInPage, isFeedishUrl, looksLikeCompetitions } from "./fetched-feed";
+import { COMMON_FEED_PAGES, COMMON_FEED_PATHS, feedLinksInPage, isFeedishUrl, looksLikePrizeDraws } from "./fetched-feed";
 import { NotAFeedError, type ParsedFeed } from "@/lib/feed/parse";
 import { parseAnyFeed, ROUTE_ORDER, routeUrl, type FeedRoute } from "./readers";
 import { Resource } from "./resource";
@@ -502,6 +502,8 @@ export function connectorMessage(error: McpError): string {
       return `Your organisation doesn't allow ${FETCH_CONNECTOR} here.`;
     case "server_unavailable":
       return `${FETCH_CONNECTOR} isn't responding right now. Try again in a few minutes.`;
+    case "cancelled":
+      return `${FETCH_CONNECTOR} took too long to answer, so Comper stopped waiting. Try again in a few minutes.`;
     case "not_granted":
     case "capability_disabled":
     case "capability_removed":
@@ -608,7 +610,8 @@ export async function fetchUrls(
       const e = error as McpError;
       lastError = e;
       if (isRateLimit(e) || LIFECYCLE_CODES.has(e.code)) throw new ConnectorProblem(isRateLimit(e) ? "rate_limited" : e.code, connectorMessage(e));
-      if (batch.length < 2 || depth >= 2) {
+      // Splitting a call that timed out would only mean more long waits.
+      if (batch.length < 2 || depth >= 2 || e.code === "cancelled") {
         for (const u of batch) out.set(urlKey(u), { url: u, error: `connector failed (${e.code})` });
         return;
       }
@@ -675,12 +678,20 @@ function record(entry: LogEntry) {
   if (logRef) serial("log", () => logRef!.set({ entries: snapshot })).catch(quiet);
 }
 
+/** Longest wait for one connector call: a stuck call otherwise hangs for many minutes. */
+const CALL_TIMEOUT_MS = 90_000;
+
 /** Call one of the connector's tools with the session id, logging the outcome. Rejects with the McpError. */
 export async function callConnector<T>(mcp: McpNs, tool: string, input: Record<string, unknown>): Promise<T> {
   const started = Date.now();
   const urls = Array.isArray(input.urls) ? input.urls.length : 0;
   try {
-    const result = await mcp.callTool(FETCH_CONNECTOR, tool, { ...input, session_id: connectorSessionId() }, { cache: false });
+    const result = await mcp.callTool(
+      FETCH_CONNECTOR,
+      tool,
+      { ...input, session_id: connectorSessionId() },
+      { cache: false, signal: AbortSignal.timeout(CALL_TIMEOUT_MS) },
+    );
     let payload = result.payload;
     if (typeof payload === "string") {
       try {
@@ -724,6 +735,38 @@ export function robotsVerdict(feedUrl: string, robots: FetchResult | undefined):
   }
   if (robots.status && robots.status >= 400 && robots.status < 500) return { allowed: true };
   return { allowed: false, reason: `robots.txt unavailable (${robots.status ? `HTTP ${robots.status}` : robots.error})` };
+}
+
+const ROBOTS_OBJECTIVE = "The robots.txt rules for crawlers";
+
+/**
+ * Fetch robots.txt for some sites (keyed like fetchUrls, by the robots.txt
+ * address). Sites whose answer was lost to a failed connector call, rather
+ * than given by the site, are asked once more in a single call, so one
+ * flaky call doesn't wrongly rule a site out.
+ */
+export async function fetchRobots(mcp: McpNs, origins: string[]): Promise<Map<string, FetchResult>> {
+  const robotsUrl = (o: string) => `${o}/robots.txt`;
+  const urls = [...new Set(origins)].map(robotsUrl);
+  if (!urls.length) return new Map();
+  const out = await fetchUrls(mcp, urls, ROBOTS_OBJECTIVE);
+  const lost = urls.filter((u) => {
+    const r = out.get(urlKey(u));
+    return !r || (r.content === undefined && !r.status && /^connector failed|^no answer/.test(r.error ?? "no answer"));
+  });
+  if (lost.length) {
+    try {
+      const again = await fetchUrls(mcp, lost, ROBOTS_OBJECTIVE);
+      for (const u of lost) {
+        const r = again.get(urlKey(u));
+        if (r) out.set(urlKey(u), r);
+      }
+    } catch (error) {
+      if (error instanceof ConnectorProblem && error.code === "rate_limited") throw error;
+      // Keep the first answers: those sites are skipped this time.
+    }
+  }
+  return out;
 }
 
 const FEED_OBJECTIVE = "Every item in this RSS feed: title, link, published date and description";
@@ -843,7 +886,7 @@ export async function findFeedOnSite(
   const learnRobots = async (urls: string[]) => {
     const missing = [...new Set(urls.map((u) => new URL(u).origin))].filter((o) => !robotsByOrigin.has(o));
     if (!missing.length) return;
-    const fetched = await fetchUrls(mcp, missing.map((o) => `${o}/robots.txt`), "The robots.txt rules for crawlers");
+    const fetched = await fetchRobots(mcp, missing);
     for (const o of missing) robotsByOrigin.set(o, fetched.get(urlKey(`${o}/robots.txt`)));
   };
 
@@ -877,7 +920,7 @@ export async function findFeedOnSite(
   if (!found.length) await tryBatch(COMMON_FEED_PATHS.map((p) => origin + p));
   if (!found.length) return null;
   const score = (f: { parsed: ParsedFeed }) =>
-    (looksLikeCompetitions(f.parsed.items.map((i) => i.title)) ? 10_000 : 0) + f.parsed.items.length;
+    (looksLikePrizeDraws(f.parsed.items) ? 10_000 : 0) + f.parsed.items.length;
   return found.sort((a, b) => score(b) - score(a))[0];
 }
 
@@ -912,10 +955,10 @@ export function checkFeeds(feedIds?: string[]): Promise<CheckSummary> {
       // robots.txt is re-read at most once a day per feed (RFC 9309 allows caching for 24 hours).
       const dayAgo = Date.now() - 86_400_000;
       const recentlyAllowed = (f: StoredFeed) => !!f.robots_ok_at && new Date(f.robots_ok_at).getTime() > dayAgo;
-      const robotsUrls = [...new Set(feeds.filter((f) => !recentlyAllowed(f)).map((f) => new URL("/robots.txt", f.url).toString()))];
+      const robotsOrigins = feeds.filter((f) => !recentlyAllowed(f)).map((f) => new URL(f.url).origin);
       let robots = new Map<string, FetchResult>();
       try {
-        if (robotsUrls.length) robots = await fetchUrls(mcp, robotsUrls, "The robots.txt rules for crawlers");
+        robots = await fetchRobots(mcp, robotsOrigins);
       } catch (error) {
         await noteCheckFailure();
         throw error;
@@ -987,7 +1030,7 @@ export function checkFeeds(feedIds?: string[]): Promise<CheckSummary> {
         const robotsUrl = new URL("/robots.txt", feed.url).toString();
         let robotsResult = robots.get(urlKey(robotsUrl));
         const found = await (async () => {
-          robotsResult ??= (await fetchUrls(mcp, [robotsUrl], "The robots.txt rules for crawlers")).get(urlKey(robotsUrl));
+          robotsResult ??= (await fetchRobots(mcp, [new URL(feed.url).origin])).get(urlKey(robotsUrl));
           return findFeedOnSite(mcp, feed.url, content, robotsResult);
         })().catch(async (error) => {
           if (error instanceof ConnectorProblem) {
@@ -1058,7 +1101,7 @@ export async function previewFeed(url: string) {
   const mcp = await capability("mcp");
   if (!mcp) throw new ConnectorProblem("not_granted", "Connectors aren't available in this view of Comper. Open it in Claude.");
   const robotsUrl = new URL("/robots.txt", url).toString();
-  const robots = (await fetchUrls(mcp, [robotsUrl], "The robots.txt rules for crawlers")).get(urlKey(robotsUrl));
+  const robots = (await fetchRobots(mcp, [new URL(url).origin])).get(urlKey(robotsUrl));
   const verdict = robotsVerdict(url, robots);
   if (!verdict.allowed) return { ok: false as const, blockedByRobots: true, error: verdict.reason };
   const read = (await readFeeds(mcp, [{ url }], { detail: true })).get(urlKey(url));

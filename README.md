@@ -64,9 +64,12 @@ What changes in the artifact version:
   Comper remembers which route worked for each feed and tries it first next
   time.
 - **Find feeds for me** (Settings). This searches Feedly's directory of RSS
-  feeds for UK competition feeds and the well-known comping sites, checks each
-  site's robots.txt, then reads the feeds it allows. It keeps feeds whose items
-  look like competitions and shows what each contains. Feeds the directory
+  feeds for comping topics and UK comping sites by name, checks each site's
+  robots.txt, then reads the feeds it allows. It keeps only free prize draws
+  and giveaways: feeds whose items mostly offer something to win, and not
+  skill or paid contests (architecture, writing, photography with an entry
+  fee) or "competition" in another sense (competition law). It shows what
+  each feed contains. Feeds the directory
   lists but that couldn't be read just then are shown as "Couldn't preview".
   If the directory can't be searched, it looks for feeds on the comping sites
   themselves instead. It adds a feed only after you confirm you've checked

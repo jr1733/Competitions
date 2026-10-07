@@ -62,7 +62,7 @@ export interface McpNs {
     server: string,
     tool: string,
     input?: unknown,
-    options?: { cache?: false | { staleTime?: number; refresh?: boolean } },
+    options?: { cache?: false | { staleTime?: number; refresh?: boolean }; signal?: AbortSignal },
   ): Promise<{ content: unknown[]; payload?: unknown }>;
 }
 

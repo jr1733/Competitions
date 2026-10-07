@@ -1,7 +1,7 @@
 import { itemToCompetition, type CompetitionDraft } from "@/lib/feed/normalise";
 import { capability, type McpError, type McpNs } from "./claude";
-import { callConnector, ConnectorProblem, connectorMessage, fetchUrls, readFeeds, robotsVerdict, urlKey } from "./data";
-import { COMMON_FEED_PAGES, COMMON_FEED_PATHS, feedLinksInPage, isFeedishUrl, looksLikeCompetitions } from "./fetched-feed";
+import { callConnector, ConnectorProblem, connectorMessage, fetchRobots, fetchUrls, readFeeds, robotsVerdict, urlKey } from "./data";
+import { COMMON_FEED_PAGES, COMMON_FEED_PATHS, feedLinksInPage, isFeedishUrl, isOffTopicFeed, looksLikeCompetitions, looksLikePrizeDraws } from "./fetched-feed";
 import { feedlySearchUrl, parseDirectory, routeUrl, type DirectoryHit, type FeedRoute } from "./readers";
 import type { ParsedFeed } from "@/lib/feed/parse";
 
@@ -131,27 +131,63 @@ export interface DiscoveryResult {
 
 const bareHost = (host: string) => host.toLowerCase().replace(/^www\./, "");
 
-/** Searches of Feedly's directory: topics, then each well-known site by name. */
-export const DIRECTORY_QUERIES = ["uk competitions", "comping", "win prizes uk", "giveaways uk", "prize draw", "competitions blog"];
+/**
+ * Searches of Feedly's directory. It finds little for phrases ("uk
+ * competitions" returns nothing), so: single topic words, then UK comping
+ * sites and blogs by address, which it matches reliably.
+ */
+export const DIRECTORY_QUERIES = ["comping", "giveaways", "competitions", "freebies", "prize draws"];
+
+export const DIRECTORY_SITES = [
+  ...KNOWN_SITES.map((site) => bareHost(new URL(site).hostname)),
+  "thecompetitionsblog.com",
+  "pixieprizes.co.uk",
+  "prizeparadise.co.uk",
+  "latestfreestuff.co.uk",
+  "magicfreebiesuk.co.uk",
+  "compersnews.com",
+  "competitionsguide.co.uk",
+  "ukcompetitions.org",
+];
 
 export function directorySearchUrls(): string[] {
-  return [
-    ...DIRECTORY_QUERIES.map((q) => feedlySearchUrl(q, 10)),
-    ...KNOWN_SITES.map((site) => feedlySearchUrl(bareHost(new URL(site).hostname), 5)),
-  ];
+  return [...DIRECTORY_QUERIES.map((q) => feedlySearchUrl(q, 10)), ...DIRECTORY_SITES.map((site) => feedlySearchUrl(site, 5))].slice(0, 20);
 }
 
 const DIRECTORY_OBJECTIVE = "Every feed in this list: feedId, title, website, description, subscribers, lastUpdated";
 
-const COMPETITION_TEXT = /\b(competitions?|comps?|comping|compers?|giveaways?|prizes?|prize draws?|sweepstakes?|win)\b/i;
+/** Words in a feed's title or description that point to prize draws. */
+const PRIZE_TEXT = /\b(comping|compers?|giveaways?|prize draws?|freebies|sweepstakes|win)\b/i;
+const COMPETITION_TEXT = /\bcompetitions\b/i;
+
+export type HitStrength = "known" | "strong" | "weak";
+
+/** How sure the directory entry alone makes us: a known comping site, prize-draw words, or just "competitions". */
+export function hitStrength(hit: DirectoryHit): HitStrength | null {
+  const known = new Set(DIRECTORY_SITES);
+  let host: string;
+  let siteHost: string;
+  try {
+    host = bareHost(new URL(hit.feedUrl).hostname);
+    siteHost = hit.website ? bareHost(new URL(hit.website).hostname) : host;
+  } catch {
+    return null;
+  }
+  const text = `${hit.title} ${hit.description}`;
+  if (isOffTopicFeed(text)) return null;
+  if (known.has(host) || known.has(siteHost)) return "known";
+  if (PRIZE_TEXT.test(text)) return "strong";
+  if (COMPETITION_TEXT.test(`${text} ${hit.website ?? ""} ${hit.feedUrl}`)) return "weak";
+  return null;
+}
 
 /**
  * Directory results worth reading: English, still updated in the last 90
- * days, about competitions (or from a well-known comping site), not already
- * added. Well-known sites first, then UK ones, then by followers.
+ * days, about prize draws (or from a known comping site), not about another
+ * kind of competition, and not already added. Known sites first, then UK
+ * ones, then by followers.
  */
-export function pickDirectoryHits(hits: DirectoryHit[], existing: Set<string>, max = 15, nowMs = Date.now()): DirectoryHit[] {
-  const known = new Set(KNOWN_SITES.map((s) => bareHost(new URL(s).hostname)));
+export function pickDirectoryHits(hits: DirectoryHit[], existing: Set<string>, max = 12, nowMs = Date.now()): DirectoryHit[] {
   const seen = new Set<string>();
   const scored: { hit: DirectoryHit; score: number }[] = [];
   for (const hit of hits) {
@@ -169,11 +205,12 @@ export function pickDirectoryHits(hits: DirectoryHit[], existing: Set<string>, m
     seen.add(key);
     if (hit.language && !/^en/i.test(hit.language)) continue;
     if (hit.lastUpdated && nowMs - hit.lastUpdated > 90 * 86_400_000) continue;
-    const isKnown = known.has(host) || known.has(siteHost);
+    const strength = hitStrength(hit);
+    if (!strength) continue;
     const text = `${hit.title} ${hit.description} ${hit.website ?? ""} ${hit.feedUrl}`;
-    if (!isKnown && !COMPETITION_TEXT.test(text)) continue;
     const uk = /\.uk\b|\buk\b|\bbritish\b|\bbritain\b/i.test(text);
-    scored.push({ hit, score: (isKnown ? 1e9 : 0) + (uk ? 1e8 : 0) + Math.min(hit.subscribers, 1e7) });
+    const rank = { known: 2e9, strong: 1e9, weak: 0 }[strength];
+    scored.push({ hit, score: rank + (uk ? 1e8 : 0) + Math.min(hit.subscribers, 1e7) });
   }
   return scored
     .sort((a, b) => b.score - a.score)
@@ -233,7 +270,7 @@ function candidate(
 async function readDirectoryHits(mcp: McpNs, hits: DirectoryHit[], onProgress: (message: string) => void): Promise<FeedCandidate[]> {
   const origins = [...new Set(hits.map((h) => originOf(h.feedUrl)))];
   onProgress(`Found ${hits.length} likely feeds. Checking robots.txt on ${origins.length} sites…`);
-  const robots = await fetchUrls(mcp, origins.map((o) => `${o}/robots.txt`), "The robots.txt rules for crawlers");
+  const robots = await fetchRobots(mcp, origins);
   const allowed = hits.filter((h) => robotsVerdict(h.feedUrl, robots.get(urlKey(`${originOf(h.feedUrl)}/robots.txt`))).allowed);
   if (!allowed.length) return [];
 
@@ -247,7 +284,8 @@ async function readDirectoryHits(mcp: McpNs, hits: DirectoryHit[], onProgress: (
   for (const hit of allowed) {
     const read = reads.get(urlKey(hit.feedUrl));
     const parsed = read?.parsed?.items.length ? read.parsed : undefined;
-    if (parsed && !looksLikeCompetitions(parsed.items.map((i) => i.title))) continue;
+    // Read: keep it only if its items are prize draws. Unread: only if the directory entry says so clearly.
+    if (parsed ? !looksLikePrizeDraws(parsed.items) || isOffTopicFeed(parsed.title) : hitStrength(hit) === "weak") continue;
     out.push(
       candidate(hit.feedUrl, parsed, parsed ? (read?.via ?? null) : null, {
         title: hit.title,
@@ -298,13 +336,13 @@ async function discoverOnSites(mcp: McpNs, existing: Set<string>, onProgress: (m
   const sites = [...new Set([...KNOWN_SITES, ...origins, ...direct.map(originOf)])].slice(0, 12);
 
   onProgress(`Checking robots.txt on ${sites.length} sites…`);
-  const robots = await fetchUrls(mcp, sites.map((o) => `${o}/robots.txt`), "The robots.txt rules for crawlers");
+  const robots = await fetchRobots(mcp, sites);
   const allowed = (u: string) => !existing.has(urlKey(u)) && robotsVerdict(u, robots.get(urlKey(`${originOf(u)}/robots.txt`))).allowed;
   // Feed links can point at other hosts (FeedBurner…): read their robots.txt before fetching.
   const learnRobots = async (urls: string[]) => {
     const missing = [...new Set(urls.map(originOf))].filter((o) => !robots.has(urlKey(`${o}/robots.txt`)));
     if (!missing.length) return;
-    const more = await fetchUrls(mcp, missing.map((o) => `${o}/robots.txt`), "The robots.txt rules for crawlers");
+    const more = await fetchRobots(mcp, missing);
     for (const o of missing) {
       const key = urlKey(`${o}/robots.txt`);
       robots.set(key, more.get(key) ?? { url: `${o}/robots.txt`, error: "no answer" });
@@ -353,7 +391,7 @@ async function discoverOnSites(mcp: McpNs, existing: Set<string>, onProgress: (m
   // /feed/ and /rss are often the same feed: keep one per site and content.
   const unique = new Map<string, FeedCandidate>();
   for (const { url, parsed, via } of feeds) {
-    if (!looksLikeCompetitions(parsed.items.map((i) => i.title))) continue;
+    if (!looksLikePrizeDraws(parsed.items) || isOffTopicFeed(parsed.title)) continue;
     const signature = `${bareHost(new URL(url).hostname)}|${parsed.items[0]?.link ?? ""}`;
     if (!unique.has(signature)) unique.set(signature, candidate(url, parsed, via));
   }
