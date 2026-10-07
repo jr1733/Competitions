@@ -564,8 +564,8 @@ export async function fetchUrls(
     }
   };
 
-  const once = async (batch: string[], fullContent = true) => {
-    const input = { urls: batch, full_content: fullContent, objective, allow_live_fetch: true };
+  const once = async (batch: string[]) => {
+    const input = { urls: batch, full_content: true, objective, allow_live_fetch: true };
     try {
       return await call(mcp, input);
     } catch (error) {
@@ -604,20 +604,6 @@ export async function fetchUrls(
     throw new ConnectorProblem(e.code, connectorMessage(e));
   }
 
-  // Feeds the site served (HTTP 2xx) but the connector couldn't turn into full content:
-  // ask once more in its shorter excerpts mode, which renders feeds the same way.
-  const unread = urls.filter((u) => {
-    const r = out.get(urlKey(u));
-    return r && r.content === undefined && r.status && r.status >= 200 && r.status < 300;
-  });
-  if (unread.length) {
-    try {
-      absorb(await once(unread.slice(0, 20), false));
-    } catch {
-      // keep the original errors
-    }
-  }
-
   if (options.detail) {
     record({
       at: now(),
@@ -637,13 +623,14 @@ export async function fetchUrls(
           };
         }
         let l: string[] | undefined;
+        let s = "ok, page";
         try {
-          parseFetchedFeed(r.content);
+          s = `ok, feed of ${parseFetchedFeed(r.content).items.length} items`;
         } catch {
           const hints = feedLinksInPage(r.content, u).hints.map((x) => x.replace(/^https?:\/\//, "").slice(0, 100));
           if (hints.length) l = hints;
         }
-        return { u: short, s: "ok", n: r.content.length, h: r.content.replace(/\s+/g, " ").slice(0, 100), l };
+        return { u: short, s, n: r.content.length, h: r.content.replace(/\s+/g, " ").slice(0, 100), l };
       }),
     });
   }

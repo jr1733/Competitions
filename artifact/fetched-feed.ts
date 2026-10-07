@@ -90,7 +90,8 @@ export function looksLikeCompetitions(titles: string[]): boolean {
   return titles.filter((t) => COMPETITION_WORDS.test(t)).length / titles.length >= 0.3;
 }
 
-const FEEDISH_PATH = /\/feed\/?$|\/rss(?:\/|\.xml|$)|\.(?:xml|rss|atom)$|\/atom(?:\/|\.xml|$)/i;
+// /feed/, /rss, .xml… and named feeds such as /feed/new-competitions or /rss/top-prizes.
+const FEEDISH_PATH = /\/feed\/?$|\/rss(?:\/|\.xml|$)|\.(?:xml|rss|atom)$|\/atom(?:\/|\.xml|$)|\/(?:feed|rss|atom)\/[\w.-]+\/?$/i;
 const FEEDISH_QUERY = /[?&](?:feed|format|type)=(?:rss|atom)/i;
 const FEED_WORDS = /\b(rss|feeds?|atom)\b/i;
 
@@ -150,6 +151,8 @@ export function feedLinksInPage(content: string, pageUrl: string): { feeds: stri
     }
     if (url.protocol !== "https:" && url.protocol !== "http:") return;
     url.hash = "";
+    // Old pages often link their own feeds over http: use https like the page itself.
+    if (url.protocol === "http:" && page.protocol === "https:" && sameSite(url.hostname, page.hostname)) url.protocol = "https:";
     const href = url.toString();
     if (href === page.toString()) return;
     if ((FEED_WORDS.test(text) || /rss|feed|xml|atom|subscribe/i.test(href)) && !hints.includes(href)) hints.push(href);

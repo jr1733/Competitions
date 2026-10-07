@@ -130,3 +130,25 @@ describe("subscribe services", async () => {
     expect(feedLinksInPage(page, "https://www.prizes.example.com/feeds").feeds).toEqual(["https://feeds.feedburner.com/X"]);
   });
 });
+
+describe("named feed addresses (from ThePrizeFinder's real feeds page)", async () => {
+  const { feedLinksInPage, isFeedishUrl } = await import("../artifact/fetched-feed");
+  it("treats /feed/<name> and /rss/<name> as feeds, but not /feeds", () => {
+    expect(isFeedishUrl("https://www.theprizefinder.com/feed/new-competitions")).toBe(true);
+    expect(isFeedishUrl("https://www.example.com/rss/top-prizes")).toBe(true);
+    expect(isFeedishUrl("https://www.theprizefinder.com/feeds")).toBe(false);
+    expect(isFeedishUrl("https://www.theprizefinder.com/competitions/new-competitions")).toBe(false);
+  });
+  it("finds the three feeds on a page shaped like ThePrizeFinder's", () => {
+    const page = `#### Enter Competitions * [New Competitions](https://www.theprizefinder.com/competitions/new-competitions)
+[Feedreader](http://www.feedreader.com/) [Feedly](http://www.feedly.com/)
+* New Competitions [![](/img/rss.gif)](http://www.theprizefinder.com/feed/new-competitions) [![](/img/yahoo.gif)](http://add.my.yahoo.com/rss?url=http://www.theprizefinder.com/feed/new-competitions) [![](/img/google.gif)](http://fusion.google.com/add?feedurl=http://www.theprizefinder.com/feed/new-competitions)
+* Top Prizes [![](/img/rss.gif)](http://www.theprizefinder.com/feed/top-prizes)
+* Closing soon [![](/img/rss.gif)](http://www.theprizefinder.com/feed/closing-soon)`;
+    expect(feedLinksInPage(page, "https://www.theprizefinder.com/feeds").feeds).toEqual([
+      "https://www.theprizefinder.com/feed/new-competitions",
+      "https://www.theprizefinder.com/feed/top-prizes",
+      "https://www.theprizefinder.com/feed/closing-soon",
+    ]);
+  });
+});
