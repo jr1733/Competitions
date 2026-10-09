@@ -42,6 +42,7 @@ import { AddCompetitionForm } from "../AddCompetitionForm";
 import { useAuth } from "../AuthGate";
 import { ConfirmButton } from "../ConfirmButton";
 import { PageHeader } from "../PageHeader";
+import { ScamFilterSettings } from "../ScamFilterSettings";
 import { Switch } from "../Switch";
 
 function Section({ id, title, children, description }: { id?: string; title: string; description?: ReactNode; children: ReactNode }) {
@@ -536,6 +537,9 @@ export function SettingsScreen() {
       <main className="flex flex-col gap-8 px-4 pt-4 pb-6">
         <FeedsSection />
         <NotificationsSection />
+        <Section id="scams" title="Scam filter">
+          <ScamFilterSettings />
+        </Section>
         <Section
           id="add"
           title="Add a competition"

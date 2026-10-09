@@ -1,14 +1,16 @@
 "use client";
 
-import { Inbox, Rss, Search, SearchX, X } from "lucide-react";
+import { Inbox, Rss, Search, SearchX, ShieldCheck, X } from "lucide-react";
 import Link from "next/link";
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { addBlocked, removeBlocked, useBlocked } from "@/lib/client/blocklist";
 import { feedResource, feedsResource, markEntered, returnToFeed, skip } from "@/lib/client/data";
 import { useResource } from "@/lib/client/resource";
 import { toast } from "@/lib/client/toast";
 import { useNow } from "@/lib/client/use-now";
 import { CATEGORIES, CATEGORY_LABELS, ENTRY_TYPE_LABELS, ENTRY_TYPES, type Category, type EntryType } from "@/lib/constants";
 import { isClosed } from "@/lib/entries";
+import { competitionRisks, groupRepeats, repeatRisk, reportPhrase, type Grouped, type Risk } from "@/lib/feed/risk";
 import type { Competition } from "@/lib/types";
 import { CardSkeleton, CompetitionCard } from "../CompetitionCard";
 import { EmptyState } from "../EmptyState";
@@ -17,6 +19,9 @@ import { SwipeCard } from "../SwipeCard";
 import { RefreshButton, SyncStatus } from "../SyncStatus";
 
 const PAGE_SIZE = 40;
+
+/** One card: a competition, any repeat listings of it, and why it looks risky (if it does). */
+type Assessed = Grouped<Competition> & { risks: Risk[] };
 
 function matches(c: Competition, query: string) {
   if (!query) return true;
@@ -40,32 +45,46 @@ export function FeedScreen({
   const [type, setType] = useState<EntryType | "all">("all");
   const [category, setCategory] = useState<Category | "all">("all");
   const [openedId, setOpenedId] = useState<string | null>(null);
+  const [showFlagged, setShowFlagged] = useState(false);
+  const blocked = useBlocked();
   const deferredQuery = useDeferredValue(query.trim());
   const sentinel = useRef<HTMLDivElement>(null);
 
   const open = useMemo(() => (data ?? []).filter((c) => !isClosed(c, now)), [data, now]);
 
+  // Repeat listings become one card; likely scams and data-grabs are hidden unless asked for.
+  const assessed = useMemo<Assessed[]>(
+    () =>
+      groupRepeats(open).map((g) => {
+        const repeated = repeatRisk(g.repeats.length);
+        return { ...g, risks: [...competitionRisks(g.item, blocked), ...(repeated ? [repeated] : [])] };
+      }),
+    [open, blocked],
+  );
+  const flaggedCount = useMemo(() => assessed.filter((a) => a.risks.length).length, [assessed]);
+  const pool = useMemo(() => (showFlagged ? assessed : assessed.filter((a) => !a.risks.length)), [assessed, showFlagged]);
+
   const typeCounts = useMemo(() => {
     const counts = Object.fromEntries(ENTRY_TYPES.map((t) => [t, 0])) as Record<EntryType, number>;
-    for (const c of open) if (category === "all" || c.category === category) counts[c.entry_type]++;
+    for (const { item: c } of pool) if (category === "all" || c.category === category) counts[c.entry_type]++;
     return counts;
-  }, [open, category]);
+  }, [pool, category]);
 
   const categoryCounts = useMemo(() => {
     const counts = new Map<Category, number>();
-    for (const c of open) if (type === "all" || c.entry_type === type) counts.set(c.category, (counts.get(c.category) ?? 0) + 1);
+    for (const { item: c } of pool) if (type === "all" || c.entry_type === type) counts.set(c.category, (counts.get(c.category) ?? 0) + 1);
     return counts;
-  }, [open, type]);
+  }, [pool, type]);
 
   const filtered = useMemo(
     () =>
-      open.filter(
-        (c) =>
+      pool.filter(
+        ({ item: c }) =>
           (type === "all" || c.entry_type === type) &&
           (category === "all" || c.category === category) &&
           matches(c, deferredQuery),
       ),
-    [open, type, category, deferredQuery],
+    [pool, type, category, deferredQuery],
   );
 
   // Render in pages so a long feed stays smooth. Changing a filter starts again at page one.
@@ -87,15 +106,34 @@ export function FeedScreen({
     return () => observer.disconnect();
   }, [filtered.length, filterKey]);
 
-  function entered(c: Competition) {
-    markEntered(c);
+  const restore = (a: Assessed) => [a.item, ...a.repeats].forEach(returnToFeed);
+
+  function entered(a: Assessed) {
+    markEntered(a.item);
+    a.repeats.forEach(skip); // the same competition listed again
     setOpenedId(null);
-    toast("Marked as entered", { tone: "success", action: { label: "Undo", onClick: () => returnToFeed(c) } });
+    toast("Marked as entered", { tone: "success", action: { label: "Undo", onClick: () => restore(a) } });
   }
 
-  function skipped(c: Competition) {
-    skip(c);
-    toast("Skipped", { action: { label: "Undo", onClick: () => returnToFeed(c) } });
+  function skipped(a: Assessed) {
+    [a.item, ...a.repeats].forEach(skip);
+    toast("Skipped", { action: { label: "Undo", onClick: () => restore(a) } });
+  }
+
+  function reported(a: Assessed) {
+    const phrase = reportPhrase(a.item);
+    [a.item, ...a.repeats].forEach(skip);
+    addBlocked(phrase);
+    toast(`Hidden as a scam. Other listings of “${phrase}” will be hidden too.`, {
+      durationMs: 6000,
+      action: {
+        label: "Undo",
+        onClick: () => {
+          removeBlocked(phrase);
+          restore(a);
+        },
+      },
+    });
   }
 
   const filtersActive = type !== "all" || category !== "all" || deferredQuery !== "";
@@ -106,7 +144,7 @@ export function FeedScreen({
         title="Feed"
         subtitle={
           <>
-            {data ? `${open.length} open · ` : ""}
+            {data ? `${pool.length} open · ` : ""}
             <SyncStatus updatedAt={updatedAt} offline={offline} loading={loading} />
           </>
         }
@@ -200,7 +238,21 @@ export function FeedScreen({
           </EmptyState>
         )}
 
-        {data && open.length > 0 && filtered.length === 0 && (
+        {data && flaggedCount > 0 && (
+          <div className="flex items-center gap-2 rounded-xl bg-zinc-100 px-3 py-2 text-sm text-zinc-600 dark:bg-zinc-900 dark:text-zinc-300" role="status">
+            <ShieldCheck className="size-4 shrink-0 text-emerald-600" aria-hidden />
+            <span className="flex-1">
+              {showFlagged
+                ? `Showing ${flaggedCount} possible scam${flaggedCount === 1 ? "" : "s"} or data-grab${flaggedCount === 1 ? "" : "s"}`
+                : `${flaggedCount} possible scam${flaggedCount === 1 ? "" : "s"} or data-grab${flaggedCount === 1 ? "" : "s"} hidden`}
+            </span>
+            <button type="button" className="font-semibold text-violet-700 dark:text-violet-300" onClick={() => setShowFlagged(!showFlagged)}>
+              {showFlagged ? "Hide" : "Show"}
+            </button>
+          </div>
+        )}
+
+        {data && open.length > 0 && pool.length > 0 && filtered.length === 0 && (
           <EmptyState icon={SearchX} title="Nothing matches">
             {filtersActive && (
               <button
@@ -218,15 +270,17 @@ export function FeedScreen({
           </EmptyState>
         )}
 
-        {filtered.slice(0, limit).map((c) => (
-          <SwipeCard key={c.id} onSwipeRight={() => entered(c)} onSwipeLeft={() => skipped(c)}>
+        {filtered.slice(0, limit).map((a) => (
+          <SwipeCard key={a.item.id} onSwipeRight={() => entered(a)} onSwipeLeft={() => skipped(a)}>
             <CompetitionCard
-              competition={c}
+              competition={a.item}
               now={now}
-              opened={openedId === c.id}
-              onOpen={() => setOpenedId(c.id)}
-              onEntered={() => entered(c)}
-              onSkip={() => skipped(c)}
+              opened={openedId === a.item.id}
+              onOpen={() => setOpenedId(a.item.id)}
+              onEntered={() => entered(a)}
+              onSkip={() => skipped(a)}
+              risks={a.risks}
+              onReport={() => reported(a)}
             />
           </SwipeCard>
         ))}
@@ -236,7 +290,7 @@ export function FeedScreen({
         {filtered.length > 0 && (
           <p className="py-4 text-center text-xs text-zinc-400">
             Swipe right for entered, left to skip
-            {filtersActive ? ` · ${filtered.length} of ${open.length} shown` : ""}
+            {filtersActive ? ` · ${filtered.length} of ${pool.length} shown` : ""}
           </p>
         )}
       </main>

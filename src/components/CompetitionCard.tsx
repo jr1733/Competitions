@@ -1,8 +1,9 @@
 "use client";
 
-import { Check, Clock, ExternalLink, SkipForward } from "lucide-react";
+import { Check, Clock, ExternalLink, Flag, SkipForward, TriangleAlert } from "lucide-react";
 import { CATEGORY_LABELS } from "@/lib/constants";
 import { describeClosing } from "@/lib/dates";
+import type { Risk } from "@/lib/feed/risk";
 import type { Competition } from "@/lib/types";
 import { EntryTypeBadge, ReentryBadge } from "./Badges";
 
@@ -21,6 +22,8 @@ export function CompetitionCard({
   onOpen,
   onEntered,
   onSkip,
+  risks = [],
+  onReport,
 }: {
   competition: Competition;
   now: Date;
@@ -28,6 +31,10 @@ export function CompetitionCard({
   onOpen: () => void;
   onEntered: () => void;
   onSkip: () => void;
+  /** Why it looks like a scam or data-grab, if it does. */
+  risks?: Risk[];
+  /** "Report scam": hide it and others listed the same way. */
+  onReport?: () => void;
 }) {
   const closing = describeClosing(c.closes_at, now);
   return (
@@ -36,10 +43,35 @@ export function CompetitionCard({
         <EntryTypeBadge type={c.entry_type} />
         <ReentryBadge reentry={c.reentry} />
         <span className="ml-auto text-xs font-medium text-zinc-500 dark:text-zinc-400">{CATEGORY_LABELS[c.category]}</span>
+        {onReport && (
+          <button
+            type="button"
+            onClick={onReport}
+            className="-my-2 -mr-2 rounded-full p-2.5 text-zinc-400 hover:text-red-600 dark:hover:text-red-400"
+            aria-label="Report as a scam"
+            title="Report as a scam"
+          >
+            <Flag className="size-4" aria-hidden />
+          </button>
+        )}
       </div>
 
       <h2 className="mt-2.5 text-lg leading-snug font-semibold text-balance">{c.prize}</h2>
       {c.summary && <p className="mt-1 line-clamp-2 text-sm text-zinc-600 dark:text-zinc-400">{c.summary}</p>}
+
+      {risks.length > 0 && (
+        <div className="mt-2.5 flex gap-2 rounded-xl bg-amber-50 p-2.5 text-sm text-amber-900 dark:bg-amber-950/60 dark:text-amber-200" role="note">
+          <TriangleAlert className="mt-0.5 size-4 shrink-0" aria-hidden />
+          <div>
+            <p className="font-semibold">Possible scam or data-grab</p>
+            <ul className="mt-0.5">
+              {risks.map((r) => (
+                <li key={r.kind}>{r.label}</li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      )}
 
       <div className="mt-2.5 flex items-center gap-1.5 text-sm">
         <Clock className="size-4 shrink-0 text-zinc-400" aria-hidden />

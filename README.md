@@ -83,10 +83,23 @@ What changes in the artifact version:
 
 | Screen       | What it does |
 | ------------ | ------------ |
-| **Feed**     | Competition cards sorted by closing date, soonest first. Each card shows the prize, closing date, entry type badge, category and source, with **Enter**, **Entered** and **Skip** buttons. **Swipe right** marks a card entered and **swipe left** skips it; both can be undone. Filter by entry type and prize category, or search. |
+| **Feed**     | Competition cards sorted by closing date, soonest first. Each card shows the prize, closing date, entry type badge, category and source, with **Enter**, **Entered** and **Skip** buttons. **Swipe right** marks a card entered and **swipe left** skips it; both can be undone. Filter by entry type and prize category, or search. Likely scams and data-grabs are hidden (see **Scam filter** below), and the same prize listed again by one source shows as one card. |
 | **Entered**  | Everything you've entered, grouped by day. Daily and weekly competitions are flagged with when they're next due. Due ones move to the top with **Enter again** and **Done** buttons. You can change a competition's re-entry frequency, log a win from it, or move it back to the feed. |
 | **Wins**     | Log a win: prize, value in £, date, and the competition (pick from your entries or paste a link). See total wins, total value, value this year, and win rate overall and by entry type. |
 | **Settings** | Manage RSS feeds: test a feed before adding it, see each feed's status, and check all feeds now. Turn on push notifications for this device and set the digest and reminder times and quiet hours. Add a competition by pasting its link. Install help and sign out. |
+
+**Scam filter.** Aggregator feeds mix genuine brand competitions with paid
+listings for lead-generation "prize draws", gambling offers and survey sites.
+The Feed hides competitions that show the usual signs: gambling offers;
+"claim", survey and "earn" bait; cash or supermarket-voucher prizes with no
+named brand ("Win £500 cash"); big-ticket gadgets with no named promoter ("Win
+an Apple iPad"); WhatsApp-group, date-of-birth and sign-up offers; and prizes
+one source lists three or more times. **Show** on the Feed reveals them with
+the reason. The flag on any card reports it as a scam: it's hidden, and so is
+anything listed with the same prize. Settings → Scam filter lists your blocked
+words and promoters, starting with ones the MoneySavingExpert forum bans (Lions
+Prizes, Good Fanz, Good Life Plus). These are signs, not proof, so nothing is
+deleted.
 
 Notifications are sent via Web Push:
 

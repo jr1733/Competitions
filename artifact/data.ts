@@ -5,6 +5,7 @@ import { toast } from "@/lib/client/toast";
 import type { Category, EntryType, Reentry } from "@/lib/constants";
 import { nextDueAt } from "@/lib/dates";
 import { dedupeByUrl, itemToCompetition, type CompetitionDraft } from "@/lib/feed/normalise";
+import { DEFAULT_BLOCKED } from "@/lib/feed/risk";
 import { normaliseUrl } from "@/lib/feed/url";
 import type { Competition, EntryStatus, EntryWithCompetition, Feed, FeedStatus, Win } from "@/lib/types";
 import { capability, FETCH_CONNECTOR, FETCH_TOOL, type CollectionRef, type DocRef, type McpError, type McpNs } from "./claude";
@@ -52,6 +53,8 @@ interface RootDoc {
   fetch_session_id?: string;
   /** When the last feed check failed at the connector, so automatic checks can back off. */
   last_check_error_at?: string | null;
+  /** Words and promoters whose competitions are hidden as likely scams; unset means the defaults. */
+  blocked?: string[];
 }
 
 interface LogEntry {
@@ -76,6 +79,7 @@ export const feedResource = new Resource<Competition[]>("feed");
 export const entriesResource = new Resource<EntryWithCompetition[]>("entries");
 export const winsResource = new Resource<Win[]>("wins");
 export const feedsResource = new Resource<Feed[]>("feeds");
+export const blockedResource = new Resource<string[]>("blocked");
 export const statsResource = new Resource<{ competitions: number; lastCheckAt: string | null; lastCheckErrorAt: string | null }>(
   "stats",
 );
@@ -246,6 +250,7 @@ function compRef(id: string): DocRef {
 function applyRoot(doc: RootDoc | null) {
   rootDoc = doc;
   feedsResource.setState({ data: doc?.feeds ?? [], updatedAt: Date.now() });
+  blockedResource.setState({ data: doc?.blocked ?? [...DEFAULT_BLOCKED] });
   feedResource.setState({ updatedAt: doc?.last_refresh_at ? new Date(doc.last_refresh_at).getTime() : null });
   statsResource.setState({
     data: { competitions: comps.size, lastCheckAt: doc?.last_refresh_at ?? null, lastCheckErrorAt: doc?.last_check_error_at ?? null },
@@ -393,6 +398,11 @@ export async function addFeed(input: { name: string; url: string; via?: FeedRout
 
 export function updateFeed(id: string, patch: Partial<Pick<Feed, "enabled" | "name">>) {
   updateRoot((r) => ({ feeds: r.feeds.map((f) => (f.id === id ? { ...f, ...patch } : f)) }), "Couldn't update the feed").catch(quiet);
+}
+
+/** Save the scam filter's blocked words (see blocklist.ts). */
+export function saveBlocked(list: string[]) {
+  updateRoot(() => ({ blocked: list }), "Couldn't save your blocked words").catch(quiet);
 }
 
 export function deleteFeed(id: string) {

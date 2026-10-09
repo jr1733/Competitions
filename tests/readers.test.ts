@@ -238,3 +238,46 @@ describe("looksLikePrizeDraws", () => {
     ).toBe(false);
   });
 });
+
+describe("Jina Reader's rendering of an RSS feed", () => {
+  // What r.jina.ai returned for the Mirror's competitions feed on 9 Oct 2026.
+  const MIRROR = `Title: Mirror - Competitions
+
+URL Source: https://www.mirror.co.uk/play/competitions/?service=rss
+
+Markdown Content:
+### [Win £250 towards your ultimate festive feast at Zizzi](https://www.mirror.co.uk/play/competitions/win-250-towards-your-ultimate-37740297)
+
+[https://www.mirror.co.uk/play/competitions/win-250-towards-your-ultimate-37740297](https://www.mirror.co.uk/play/competitions/win-250-towards-your-ultimate-37740297)  
+Wed, 7 Oct 2026 14:00:31 +0000
+
+### [Win a luxury two-night stay for two at the iconic Town Hall Hotel in East London, including dinner at Elis!](https://www.mirror.co.uk/play/competitions/win-luxury-two-night-stay-37714285)
+
+[https://www.mirror.co.uk/play/competitions/win-luxury-two-night-stay-37714285](https://www.mirror.co.uk/play/competitions/win-luxury-two-night-stay-37714285)  
+Mon, 5 Oct 2026 11:47:48 +0000
+`;
+
+  it("reads the items", () => {
+    const feed = parseAnyFeed(MIRROR);
+    expect(feed.title).toBe("Mirror - Competitions");
+    expect(feed.items.map((i) => [i.title, i.link, i.publishedAt, i.html])).toEqual([
+      [
+        "Win £250 towards your ultimate festive feast at Zizzi",
+        "https://www.mirror.co.uk/play/competitions/win-250-towards-your-ultimate-37740297",
+        "Wed, 7 Oct 2026 14:00:31 +0000",
+        "",
+      ],
+      [
+        "Win a luxury two-night stay for two at the iconic Town Hall Hotel in East London, including dinner at Elis!",
+        "https://www.mirror.co.uk/play/competitions/win-luxury-two-night-stay-37714285",
+        "Mon, 5 Oct 2026 11:47:48 +0000",
+        "",
+      ],
+    ]);
+  });
+
+  it("doesn't take an ordinary page with linked headings for a feed", () => {
+    const page = "Title: News\n\nURL Source: https://news.example.co.uk/\n\nMarkdown Content:\n### [Big story](https://news.example.co.uk/a)\n\nSome text.\n";
+    expect(() => parseAnyFeed(page)).toThrow(NotAFeedError);
+  });
+});

@@ -154,13 +154,15 @@ export const DIRECTORY_SITES = [
  * them and their items are free prize draws. Always read alongside what
  * the directory finds, since Feedly lists only some of them. Each address
  * is the form that read cleanly: Feedly knows ThePrizeFinder's first two
- * by their http:// address; the other two read through rss2json.
+ * by their http:// address; the next two read through rss2json.
  */
 export const KNOWN_FEEDS: DirectoryHit[] = [
   ["http://www.theprizefinder.com/feed/new-competitions", "ThePrizeFinder: New competitions"],
   ["http://www.theprizefinder.com/feed/top-prizes", "ThePrizeFinder: Top prizes"],
   ["https://www.theprizefinder.com/feed/closing-soon", "ThePrizeFinder: Closing soon"],
   ["https://www.latestfreestuff.co.uk/free-competitions/feed/", "Latest Free Stuff: Free competitions"],
+  // Run by the paper itself, so no paid listings. Reads only through Jina Reader.
+  ["https://www.mirror.co.uk/play/competitions/?service=rss", "Mirror: Competitions"],
 ].map(([feedUrl, title]) => ({
   feedUrl,
   title,

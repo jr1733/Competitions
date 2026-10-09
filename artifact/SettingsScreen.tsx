@@ -17,6 +17,7 @@ import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { AddCompetitionForm } from "@/components/AddCompetitionForm";
 import { ConfirmButton } from "@/components/ConfirmButton";
 import { PageHeader } from "@/components/PageHeader";
+import { ScamFilterSettings } from "@/components/ScamFilterSettings";
 import { Switch } from "@/components/Switch";
 import { errorText } from "@/lib/client/network";
 import { toast } from "@/lib/client/toast";
@@ -491,6 +492,10 @@ export function SettingsScreen() {
       <PageHeader title="Settings" />
       <main className="flex flex-col gap-8 px-4 pt-4 pb-6">
         <FeedsSection />
+
+        <Section id="scams" title="Scam filter">
+          <ScamFilterSettings />
+        </Section>
 
         <Section id="reminders" title="Reminders">
           <div className="card flex gap-3 p-4 text-sm">

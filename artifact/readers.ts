@@ -158,7 +158,38 @@ export function parseAnyFeed(content: string): ParsedFeed {
       // not a whole feed: fall through
     }
   }
+  const jina = fromJinaRss(text);
+  if (jina) return jina;
   return parseFetchedFeed(text);
+}
+
+const RFC822_DATE = /^\s*(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{1,2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}(?::\d{2})? (?:[+-]\d{4}|GMT|UTC)\s*$/;
+
+/**
+ * Jina Reader's rendering of an RSS feed: a "Title: / URL Source: /
+ * Markdown Content:" header, then for each item a "### [Title](link)"
+ * heading, the link again and its date. Each item must carry a feed-style
+ * date, so an ordinary page with linked headings isn't mistaken for a feed.
+ */
+function fromJinaRss(text: string): ParsedFeed | null {
+  const body = /\bMarkdown Content:\s*\n([\s\S]*)$/.exec(text)?.[1];
+  if (!body || !/^\s*URL Source:/m.test(text.slice(0, 1500))) return null;
+  const items: RawFeedItem[] = [];
+  for (const section of body.split(/\n(?=#{1,4}\s+\[)/)) {
+    const heading = /^\s*#{1,4}\s+\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/.exec(section);
+    if (!heading) continue;
+    const lines = section.split("\n").slice(1);
+    const date = lines.find((l) => RFC822_DATE.test(l))?.trim();
+    if (!date) continue;
+    const description = lines
+      .filter((l) => !RFC822_DATE.test(l) && !/^\s*\[?https?:\/\/\S+\s*$/.test(l) && !/^\s*\[https?:\/\/[^\]]*\]\([^)]*\)\s*$/.test(l))
+      .join("\n")
+      .trim();
+    items.push({ title: heading[1].trim(), link: heading[2], html: description, categories: [], publishedAt: date, dateHints: [] });
+  }
+  if (!items.length) return null;
+  const title = /^\s*Title:\s*(.*)$/m.exec(text)?.[1]?.trim() ?? "";
+  return { format: "rss", title, items };
 }
 
 /**
